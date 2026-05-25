@@ -1,0 +1,71 @@
+services:
+  front:
+    container_name: longdcam_front_prod
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://longdcam-api.ghmate.com
+        VITE_SOCKET_URL: https://longdcam-api.ghmate.com
+        VITE_ENV: production
+    networks:
+      - longdcam_prod
+      - nginx_proxy
+    restart: always
+
+  api:
+    container_name: longdcam_api_prod
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    network_mode: host
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  turn:
+    container_name: longdcam_turn_prod
+    image: coturn/coturn:latest
+    network_mode: host
+    volumes:
+      - ./turn/turnserver.conf:/etc/turnserver.conf:ro
+    command: ["-c", "/etc/turnserver.conf"]
+    restart: always
+
+  mysql:
+    container_name: longdcam_mysql_prod
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: longdcam
+      MYSQL_USER: ${MYSQL_USER:-longdcam}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_prod_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - longdcam_prod
+    restart: always
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  longdcam_prod:
+    driver: bridge
+  nginx_proxy:
+    external: true
+
+volumes:
+  mysql_prod_data:

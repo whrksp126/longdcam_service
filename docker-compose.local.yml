@@ -1,0 +1,29 @@
+services:
+  mysql:
+    container_name: longdcam_mysql_local
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: longdcam
+      MYSQL_USER: longdcam
+      MYSQL_PASSWORD: longdcam1234
+    ports:
+      - "3360:3306"
+    volumes:
+      - mysql_local_data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - longdcam_local
+    restart: always
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  longdcam_local:
+    driver: bridge
+
+volumes:
+  mysql_local_data:

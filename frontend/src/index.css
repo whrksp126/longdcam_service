@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-dark-900 text-white;
+    font-family: 'Inter', 'Pretendard', system-ui, sans-serif;
+    overscroll-behavior: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-dark-600 rounded-full;
+  }
+}
+
+@layer components {
+  .glass {
+    @apply bg-dark-800/80 backdrop-blur-lg border border-white/5;
+  }
+
+  .glass-strong {
+    @apply bg-dark-900/90 backdrop-blur-xl border border-white/10;
+  }
+
+  .btn-primary {
+    @apply bg-primary hover:bg-primary-hover text-white font-semibold px-6 py-3 rounded-btn
+           transition-all duration-200 active:scale-95;
+  }
+
+  .btn-secondary {
+    @apply bg-dark-700 hover:bg-dark-600 text-white font-medium px-6 py-3 rounded-btn
+           transition-all duration-200 active:scale-95 border border-white/10;
+  }
+
+  .btn-icon {
+    @apply w-12 h-12 rounded-full flex items-center justify-center
+           transition-all duration-200 active:scale-90;
+  }
+
+  .feed-card {
+    @apply relative rounded-feed overflow-hidden bg-dark-800;
+  }
+}
