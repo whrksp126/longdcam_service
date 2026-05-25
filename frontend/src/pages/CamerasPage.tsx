@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Smartphone, Tablet, Monitor, Camera,
-  ChevronLeft, WifiOff, Power, RefreshCw, SwitchCamera,
+  ChevronLeft, WifiOff, Power, RefreshCw,
 } from 'lucide-react';
 import { Button } from '../components/common/Button';
 import { showToast } from '../components/common/Toast';
@@ -30,6 +30,8 @@ function RemoteCameraPreview({
   isOnline,
   isInRoom,
   isCameraActive,
+  remoteCameraCount,
+  remoteCameraActiveIndex,
   onEditName,
 }: {
   camId: string;
@@ -38,6 +40,8 @@ function RemoteCameraPreview({
   isOnline: boolean;
   isInRoom: boolean;
   isCameraActive: boolean;
+  remoteCameraCount: number;
+  remoteCameraActiveIndex: number;
   onEditName: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -102,10 +106,10 @@ function RemoteCameraPreview({
     });
   }
 
-  function handleSwitchCamera() {
+  function handleSwitchCamera(cameraIndex: number) {
     const socket = getSocket();
     if (!socket.connected) return;
-    socket.emit('camera:requestSwitchCamera', { targetDeviceId: camId }, (res: any) => {
+    socket.emit('camera:requestSwitchCamera', { targetDeviceId: camId, cameraIndex }, (res: any) => {
       if (res?.error) showToast(res.error, 'error');
     });
   }
@@ -174,14 +178,22 @@ function RemoteCameraPreview({
           </div>
         )}
 
-        {isOnline && isCameraActive && (
-          <button
-            onClick={handleSwitchCamera}
-            className="absolute top-2 right-11 w-7 h-7 rounded-full flex items-center justify-center backdrop-blur-sm bg-white/10 text-white/60 hover:bg-white/20 transition-colors"
-            title="카메라 전환"
-          >
-            <SwitchCamera size={12} />
-          </button>
+        {isOnline && isCameraActive && remoteCameraCount > 1 && (
+          <div className="absolute bottom-3 right-3 flex bg-black/60 backdrop-blur-sm rounded-full overflow-hidden">
+            {Array.from({ length: remoteCameraCount }, (_, i) => (
+              <button
+                key={i}
+                onClick={() => handleSwitchCamera(i)}
+                className={`px-2.5 py-1 text-xs font-bold transition-colors ${
+                  i === remoteCameraActiveIndex
+                    ? 'bg-primary text-white'
+                    : 'text-white/60 hover:text-white'
+                }`}
+              >
+                {i + 1}
+              </button>
+            ))}
+          </div>
         )}
 
         {isOnline && (
@@ -423,6 +435,8 @@ export function CamerasPage() {
                         isOnline={cam.isOnline}
                         isInRoom={cam.isInRoom}
                         isCameraActive={cam.isCameraActive}
+                        remoteCameraCount={cam.remoteCameraCount}
+                        remoteCameraActiveIndex={cam.remoteCameraActiveIndex}
                         onEditName={() => startEditing(cam.id, cam.cameraName)}
                       />
                     )}

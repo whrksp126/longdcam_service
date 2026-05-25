@@ -24,6 +24,14 @@ export function useGlobalSocket() {
     useAlwaysOnCamera.getState().start().then(() => {
       if (socket.connected) {
         socket.emit('camera:activeStatusUpdate', { isActive: true });
+        const { availableCameras, activeCameraId } = useAlwaysOnCamera.getState();
+        if (availableCameras.length > 0) {
+          const activeIndex = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
+          socket.emit('camera:cameraListUpdate', {
+            cameraCount: availableCameras.length,
+            activeIndex: Math.max(0, activeIndex),
+          });
+        }
       }
     });
 
@@ -54,6 +62,14 @@ export function useGlobalSocket() {
     socket.on('camera:powerOn', async () => {
       await useAlwaysOnCamera.getState().start();
       socket.emit('camera:activeStatusUpdate', { isActive: true });
+      const { availableCameras, activeCameraId } = useAlwaysOnCamera.getState();
+      if (availableCameras.length > 0) {
+        const activeIndex = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
+        socket.emit('camera:cameraListUpdate', {
+          cameraCount: availableCameras.length,
+          activeIndex: Math.max(0, activeIndex),
+        });
+      }
     });
 
     socket.on('camera:powerOff', () => {
@@ -61,14 +77,32 @@ export function useGlobalSocket() {
       socket.emit('camera:activeStatusUpdate', { isActive: false });
     });
 
-    socket.on('camera:switchRequested', async () => {
+    socket.on('camera:switchRequested', async ({ cameraIndex }: { cameraIndex?: number }) => {
       const cam = useAlwaysOnCamera.getState();
       const { availableCameras, activeCameraId } = cam;
       if (availableCameras.length <= 1) return;
-      const currentIdx = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
-      const nextIdx = (currentIdx + 1) % availableCameras.length;
+
+      let nextIdx: number;
+      if (cameraIndex !== undefined && cameraIndex >= 0 && cameraIndex < availableCameras.length) {
+        nextIdx = cameraIndex;
+      } else {
+        const currentIdx = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
+        nextIdx = (currentIdx + 1) % availableCameras.length;
+      }
+
       await cam.switchCamera(availableCameras[nextIdx].deviceId);
       socket.emit('camera:activeStatusUpdate', { isActive: true });
+      socket.emit('camera:cameraListUpdate', {
+        cameraCount: availableCameras.length,
+        activeIndex: nextIdx,
+      });
+    });
+
+    socket.on('camera:cameraListUpdate', ({ deviceId: id, cameraCount, activeIndex }: any) => {
+      useCameraStore.getState().updateCamera(id, {
+        remoteCameraCount: cameraCount,
+        remoteCameraActiveIndex: activeIndex,
+      });
     });
 
     setupPreviewStreamer();

@@ -140,7 +140,7 @@ export function setupSocketHandlers(io: Server) {
       }
     });
 
-    socket.on('camera:requestSwitchCamera', async ({ targetDeviceId }, callback) => {
+    socket.on('camera:requestSwitchCamera', async ({ targetDeviceId, cameraIndex }, callback) => {
       try {
         const targetDevice = await Device.findOne({
           where: { id: targetDeviceId, user_id: user.userId, is_active: true },
@@ -148,11 +148,19 @@ export function setupSocketHandlers(io: Server) {
         if (!targetDevice || !targetDevice.is_online || !targetDevice.socket_id) {
           return callback?.({ error: '대상 기기가 오프라인입니다' });
         }
-        io.to(targetDevice.socket_id).emit('camera:switchRequested');
+        io.to(targetDevice.socket_id).emit('camera:switchRequested', { cameraIndex });
         callback?.({ success: true });
       } catch (err: any) {
         callback?.({ error: err.message });
       }
+    });
+
+    socket.on('camera:cameraListUpdate', ({ cameraCount, activeIndex }) => {
+      socket.to(`user:${user.userId}`).emit('camera:cameraListUpdate', {
+        deviceId,
+        cameraCount,
+        activeIndex,
+      });
     });
 
     // --- P2P preview signaling ---

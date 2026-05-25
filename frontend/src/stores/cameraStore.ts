@@ -12,6 +12,8 @@ export interface CameraDevice {
   isCameraActive: boolean;
   isCurrentDevice: boolean;
   lastSeenAt: string | null;
+  remoteCameraCount: number;
+  remoteCameraActiveIndex: number;
 }
 
 interface CameraState {
@@ -48,6 +50,8 @@ export const useCameraStore = create<CameraState>()((set) => ({
         isCameraActive: false,
         isCurrentDevice: d.id === currentDeviceId,
         lastSeenAt: d.last_seen_at,
+        remoteCameraCount: 0,
+        remoteCameraActiveIndex: 0,
       }));
       set({ cameras, loading: false });
     } catch {
