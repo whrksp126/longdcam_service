@@ -442,26 +442,46 @@ export function setupSocketHandlers(io: Server) {
       }
     });
 
-    socket.on('media:resumeConsumer', async ({ consumerId }) => {
-      if (!currentRoomId) return;
-      await mediasoupManager.resumeConsumer(currentRoomId, consumerId);
+    socket.on('media:resumeConsumer', async ({ consumerId }, callback) => {
+      try {
+        if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+        await mediasoupManager.resumeConsumer(currentRoomId, consumerId);
+        callback?.({});
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
     });
 
-    socket.on('media:pauseConsumer', async ({ consumerId }) => {
-      if (!currentRoomId) return;
-      await mediasoupManager.pauseConsumer(currentRoomId, consumerId);
+    socket.on('media:pauseConsumer', async ({ consumerId }, callback) => {
+      try {
+        if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+        await mediasoupManager.pauseConsumer(currentRoomId, consumerId);
+        callback?.({});
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
     });
 
-    socket.on('media:pauseProducer', async ({ producerId }) => {
-      if (!currentRoomId) return;
-      await mediasoupManager.pauseProducer(currentRoomId, producerId);
-      socket.to(currentRoomId).emit('media:producerPaused', { producerId });
+    socket.on('media:pauseProducer', async ({ producerId }, callback) => {
+      try {
+        if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+        await mediasoupManager.pauseProducer(currentRoomId, producerId);
+        socket.to(currentRoomId).emit('media:producerPaused', { producerId });
+        callback?.({});
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
     });
 
-    socket.on('media:resumeProducer', async ({ producerId }) => {
-      if (!currentRoomId) return;
-      await mediasoupManager.resumeProducer(currentRoomId, producerId);
-      socket.to(currentRoomId).emit('media:producerResumed', { producerId });
+    socket.on('media:resumeProducer', async ({ producerId }, callback) => {
+      try {
+        if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+        await mediasoupManager.resumeProducer(currentRoomId, producerId);
+        socket.to(currentRoomId).emit('media:producerResumed', { producerId });
+        callback?.({});
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
     });
 
     socket.on('media:closeProducer', async ({ producerId }) => {
