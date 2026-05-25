@@ -4,7 +4,7 @@ import { useCameraStore } from '../stores/cameraStore';
 import { useAlwaysOnCamera } from '../services/alwaysOnCamera';
 import { getSocket, disconnectSocket } from '../lib/socket';
 import { useBackgroundCamera } from '../services/backgroundCamera';
-import { setupPreviewStreamer, cleanupAllOutgoing } from '../services/previewStream';
+import { setupPreviewStreamer, setupCameraChangeListener, cleanupAllOutgoing } from '../services/previewStream';
 
 let initialized = false;
 
@@ -106,6 +106,7 @@ export function useGlobalSocket() {
     });
 
     setupPreviewStreamer();
+    setupCameraChangeListener();
     fetchCameras(deviceId);
   }, [token]);
 

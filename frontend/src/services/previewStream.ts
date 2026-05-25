@@ -98,6 +98,29 @@ export function setupPreviewStreamer() {
   });
 }
 
+function replaceTrackInAllOutgoing(newVideoTrack: MediaStreamTrack | null) {
+  if (!newVideoTrack) return;
+  for (const [, entry] of outgoing) {
+    const sender = entry.pc.getSenders().find((s) => s.track?.kind === 'video');
+    if (sender) {
+      sender.replaceTrack(newVideoTrack).catch(() => {});
+    }
+  }
+}
+
+export function setupCameraChangeListener() {
+  let prevCameraId = useAlwaysOnCamera.getState().activeCameraId;
+  return useAlwaysOnCamera.subscribe((state) => {
+    if (state.activeCameraId !== prevCameraId) {
+      prevCameraId = state.activeCameraId;
+      const videoTrack = state.getVideoTrack();
+      if (videoTrack && outgoing.size > 0) {
+        replaceTrackInAllOutgoing(videoTrack);
+      }
+    }
+  });
+}
+
 export function cleanupAllOutgoing() {
   for (const [, entry] of outgoing) {
     entry.pc.close();
