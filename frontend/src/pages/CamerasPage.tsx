@@ -42,17 +42,26 @@ function RemoteCameraPreview({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const connRef = useRef<PreviewConnection | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [previewStatus, setPreviewStatus] = useState<PreviewStatus>('connecting');
   const [powerToggling, setPowerToggling] = useState(false);
+
+  useEffect(() => {
+    if (previewStatus === 'live' && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+    }
+  }, [previewStatus]);
 
   const connectPreview = useCallback(() => {
     connRef.current?.close();
     connRef.current = null;
+    streamRef.current = null;
     setPreviewStatus('connecting');
 
     connRef.current = requestPreview(
       camId,
       (stream) => {
+        streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
         }
