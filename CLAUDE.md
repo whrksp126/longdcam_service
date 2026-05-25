@@ -1,11 +1,11 @@
-# Longdcam - Multi-Camera Video Conferencing
+# Longdcam Service
 
 ## Project Overview
 Self-hosted multi-camera video conferencing PWA. Users register devices (phones, tablets, desktops) as "cameras", then create or join rooms where multiple device cameras stream simultaneously via WebRTC SFU (mediasoup). A single user can have multiple devices, each acting as an independent camera that can be remotely started/stopped and previewed via P2P WebRTC.
 
 ## Architecture
 
-### Backend (`/backend/src/`)
+### Backend (`backend/src/`)
 - **Runtime**: Node.js 20, TypeScript (ES2022, CommonJS), Express.js 4.21
 - **Realtime**: Socket.IO 4.8 for signaling + device control
 - **Media**: mediasoup 3.14 SFU (VP8/VP9/Opus, simulcast 3-layer)
@@ -15,7 +15,7 @@ Self-hosted multi-camera video conferencing PWA. Users register devices (phones,
 - **Storage**: AWS SDK v3 → self-hosted MinIO (objectstore.ghmate.com), path-style
 - **TURN**: coturn with HMAC-SHA1 ephemeral credentials (24h TTL)
 
-### Frontend (`/frontend/src/`)
+### Frontend (`frontend/src/`)
 - **Framework**: React 18.3, TypeScript (ES2020, ESNext modules)
 - **Build**: Vite 5.4 + PWA plugin (standalone display, auto-updating service worker)
 - **Styling**: Tailwind CSS 3.4 with custom dark theme (dark-900 base, primary #FE2C55, secondary #25F4EE)
@@ -87,10 +87,10 @@ frontend/src/
 
 ### Local Setup
 ```bash
-# Option 1: cmux-based (recommended)
+# From project root (longdcam/)
 bash local-setup.sh
 
-# Option 2: Manual
+# Manual (from longdcam_service/)
 docker compose -f docker-compose.local.yml up -d   # MySQL on port 3360
 cd backend && set -a && source .env.local && set +a && npm run dev
 cd frontend && npm run dev
