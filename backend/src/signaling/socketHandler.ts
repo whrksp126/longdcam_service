@@ -371,6 +371,7 @@ export function setupSocketHandlers(io: Server) {
 
     socket.on('media:connectTransport', async ({ transportId, dtlsParameters }, callback) => {
       try {
+        console.log(`[media:connectTransport] ${user.nickname}:${deviceId} transport=${transportId.slice(0,8)} room=${currentRoomId}`);
         if (!currentRoomId) return callback({ error: 'Not in a room' });
         await mediasoupManager.connectTransport(currentRoomId, transportId, dtlsParameters);
         callback({});
@@ -381,6 +382,7 @@ export function setupSocketHandlers(io: Server) {
 
     socket.on('media:produce', async ({ transportId, kind, rtpParameters, appData }, callback) => {
       try {
+        console.log(`[media:produce] ${user.nickname}:${deviceId} kind=${kind} room=${currentRoomId}`);
         if (!currentRoomId) return callback({ error: 'Not in a room' });
 
         const producer = await mediasoupManager.produce(
@@ -413,6 +415,7 @@ export function setupSocketHandlers(io: Server) {
 
     socket.on('media:consume', async ({ producerId, rtpCapabilities }, callback) => {
       try {
+        console.log(`[media:consume] ${user.nickname}:${deviceId} consuming ${producerId} room=${currentRoomId}`);
         if (!currentRoomId) return callback({ error: 'Not in a room' });
 
         const participants = getRoomParticipants(currentRoomId);
