@@ -5,8 +5,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: https://longdcam-api.ghmate.com
-        VITE_SOCKET_URL: https://longdcam-api.ghmate.com
+        VITE_API_URL: https://longdcam-back.ghmate.com
+        VITE_SOCKET_URL: https://longdcam-back.ghmate.com
         VITE_ENV: production
     networks:
       - longdcam_prod
@@ -49,6 +49,8 @@ services:
       MYSQL_DATABASE: longdcam
       MYSQL_USER: ${MYSQL_USER:-longdcam}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql_prod_data:/var/lib/mysql
       - ./db/init:/docker-entrypoint-initdb.d:ro
