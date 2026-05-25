@@ -488,8 +488,8 @@ export function setupSocketHandlers(io: Server) {
       handleRoomLeave();
     });
 
-    socket.on('disconnect', () => {
-      handleDisconnect();
+    socket.on('disconnect', (reason) => {
+      handleDisconnect(reason);
     });
 
     function handleRoomLeave() {
@@ -537,7 +537,7 @@ export function setupSocketHandlers(io: Server) {
       currentRoomId = null;
     }
 
-    async function handleDisconnect() {
+    async function handleDisconnect(reason?: string) {
       handleRoomLeave();
 
       if (deviceId) {
@@ -551,7 +551,7 @@ export function setupSocketHandlers(io: Server) {
         });
       }
 
-      console.log(`Socket disconnected: ${socket.id} (${user.nickname})`);
+      console.log(`Socket disconnected: ${socket.id} (${user.nickname}) reason=${reason}`);
     }
   });
 }
