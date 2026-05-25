@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Smartphone, Tablet, Monitor, Camera,
-  ChevronLeft, WifiOff, Power, RefreshCw,
+  ChevronLeft, WifiOff, Power, RefreshCw, SwitchCamera,
 } from 'lucide-react';
 import { Button } from '../components/common/Button';
 import { showToast } from '../components/common/Toast';
@@ -102,6 +102,14 @@ function RemoteCameraPreview({
     });
   }
 
+  function handleSwitchCamera() {
+    const socket = getSocket();
+    if (!socket.connected) return;
+    socket.emit('camera:requestSwitchCamera', { targetDeviceId: camId }, (res: any) => {
+      if (res?.error) showToast(res.error, 'error');
+    });
+  }
+
   return (
     <div className={`glass rounded-xl overflow-hidden ${!isOnline ? 'opacity-50' : ''}`}>
       <div className="bg-dark-800 relative">
@@ -164,6 +172,16 @@ function RemoteCameraPreview({
           <div className="absolute top-2 right-12 flex items-center gap-1 bg-primary/80 backdrop-blur-sm rounded-full px-2 py-0.5">
             <span className="text-[10px] text-white">스트리밍</span>
           </div>
+        )}
+
+        {isOnline && isCameraActive && (
+          <button
+            onClick={handleSwitchCamera}
+            className="absolute top-2 right-11 w-7 h-7 rounded-full flex items-center justify-center backdrop-blur-sm bg-white/10 text-white/60 hover:bg-white/20 transition-colors"
+            title="카메라 전환"
+          >
+            <SwitchCamera size={12} />
+          </button>
         )}
 
         {isOnline && (

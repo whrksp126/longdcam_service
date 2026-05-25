@@ -61,6 +61,16 @@ export function useGlobalSocket() {
       socket.emit('camera:activeStatusUpdate', { isActive: false });
     });
 
+    socket.on('camera:switchRequested', async () => {
+      const cam = useAlwaysOnCamera.getState();
+      const { availableCameras, activeCameraId } = cam;
+      if (availableCameras.length <= 1) return;
+      const currentIdx = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
+      const nextIdx = (currentIdx + 1) % availableCameras.length;
+      await cam.switchCamera(availableCameras[nextIdx].deviceId);
+      socket.emit('camera:activeStatusUpdate', { isActive: true });
+    });
+
     setupPreviewStreamer();
     fetchCameras(deviceId);
   }, [token]);

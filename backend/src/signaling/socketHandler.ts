@@ -140,6 +140,21 @@ export function setupSocketHandlers(io: Server) {
       }
     });
 
+    socket.on('camera:requestSwitchCamera', async ({ targetDeviceId }, callback) => {
+      try {
+        const targetDevice = await Device.findOne({
+          where: { id: targetDeviceId, user_id: user.userId, is_active: true },
+        });
+        if (!targetDevice || !targetDevice.is_online || !targetDevice.socket_id) {
+          return callback?.({ error: '대상 기기가 오프라인입니다' });
+        }
+        io.to(targetDevice.socket_id).emit('camera:switchRequested');
+        callback?.({ success: true });
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
+    });
+
     // --- P2P preview signaling ---
     socket.on('preview:request', async ({ targetDeviceId }, callback) => {
       try {
