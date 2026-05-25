@@ -21,7 +21,7 @@ async function main() {
   const io = new Server(httpServer, {
     cors: {
       origin: isProd
-        ? ['https://longdcam.ghmate.com', 'https://dev-longdcam.ghmate.com']
+        ? ['https://longdcam-front.ghmate.com']
         : true,
       credentials: true,
     },
