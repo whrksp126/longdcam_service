@@ -254,6 +254,7 @@ export function setupSocketHandlers(io: Server) {
     // --- Tier 2: Room events (unchanged) ---
     socket.on('room:join', async ({ roomSlug }: { roomSlug: string }, callback) => {
       try {
+        console.log(`[room:join] ${user.nickname}:${deviceId} joining ${roomSlug}`);
         const roomMedia = await mediasoupManager.getOrCreateRoom(roomSlug);
         currentRoomId = roomSlug;
 
@@ -315,17 +316,20 @@ export function setupSocketHandlers(io: Server) {
           deviceLabel: p.deviceLabel,
         }));
 
+        console.log(`[room:join] ${user.nickname}:${deviceId} joined OK (${participantList.length} participants, ${existingProducers.length} producers)`);
         callback({
           participants: participantList,
           existingProducers,
           iceServers: turnCredentials.iceServers,
         });
       } catch (err: any) {
+        console.error(`[room:join] ERROR for ${user.nickname}:${deviceId}:`, err.message);
         callback({ error: err.message });
       }
     });
 
     socket.on('media:getRouterRtpCapabilities', async (_, callback) => {
+      console.log(`[media:getRtpCaps] ${user.nickname}:${deviceId} room=${currentRoomId}`);
       if (!currentRoomId) return callback({ error: 'Not in a room' });
       const caps = mediasoupManager.getRouterRtpCapabilities(currentRoomId);
       callback({ rtpCapabilities: caps });
@@ -333,6 +337,7 @@ export function setupSocketHandlers(io: Server) {
 
     socket.on('media:createSendTransport', async (_, callback) => {
       try {
+        console.log(`[media:createSendTransport] ${user.nickname}:${deviceId} room=${currentRoomId}`);
         if (!currentRoomId) return callback({ error: 'Not in a room' });
         const transportOptions = await mediasoupManager.createWebRtcTransport(currentRoomId);
 
@@ -349,6 +354,7 @@ export function setupSocketHandlers(io: Server) {
 
     socket.on('media:createRecvTransport', async (_, callback) => {
       try {
+        console.log(`[media:createRecvTransport] ${user.nickname}:${deviceId} room=${currentRoomId}`);
         if (!currentRoomId) return callback({ error: 'Not in a room' });
         const transportOptions = await mediasoupManager.createWebRtcTransport(currentRoomId);
 
