@@ -19,11 +19,12 @@ import { BottomBar } from '../components/layout/BottomBar';
 import { ReconnectingOverlay } from '../components/connection/ReconnectingOverlay';
 import { LoadingScreen } from '../components/common/LoadingScreen';
 import { CameraControlPanel } from '../components/room/CameraControlPanel';
+import { CameraPreviewTile } from '../components/devices/CameraPreviewTile';
 import { TheaterMode } from '../components/room/TheaterMode';
 import { useWatchSync } from '../hooks/useWatchSync';
 import { Button } from '../components/common/Button';
 import { showToast } from '../components/common/Toast';
-import { Smartphone, Tablet, Monitor, Camera, Mic, MicOff, Video, VideoOff } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff } from 'lucide-react';
 import { initSounds, playSound } from '../lib/sounds';
 import type { Participant, ProducerInfo } from '../types/room';
 
@@ -75,6 +76,7 @@ export function RoomPage() {
   const [localScreenTrack, setLocalScreenTrack] = useState<MediaStreamTrack | null>(null);
   const localAudioTrackRef = useRef<MediaStreamTrack | null>(null);
   const joinedRef = useRef(false);
+  const consumedProducerIds = useRef<Set<string>>(new Set());
 
   // Lobby state
   const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
@@ -198,9 +200,52 @@ export function RoomPage() {
       setRoom(slug, slug);
       setParticipants(result.participants);
 
+      // Consume each producer at most once (existing + new), so we never miss or
+      // double-consume a feed (e.g. another of my devices joining concurrently).
+      const consumeOnce = (producerId: string) => {
+        if (consumedProducerIds.current.has(producerId)) return;
+        consumedProducerIds.current.add(producerId);
+        consume(producerId).catch(() => consumedProducerIds.current.delete(producerId));
+      };
+
+      // Register the producer listener IMMEDIATELY (before our transports/camera are
+      // set up), buffering anything that arrives until the recv transport is ready —
+      // otherwise a fast-joining device's producer slips through the gap and is missed.
+      const earlyProducers: string[] = [];
+      let recvReady = false;
+      socket.on('media:newProducer', (data: ProducerInfo) => {
+        if (recvReady) consumeOnce(data.producerId);
+        else earlyProducers.push(data.producerId);
+      });
+
       await loadDevice();
       await createSendTransport();
       await createRecvTransport();
+      recvReady = true;
+
+      // dynacast: cap how many simulcast layers we send to what viewers watch.
+      // setMaxSpatialLayer caps the RTCRtpSender without disabling the track, so
+      // our own self-view stays live.
+      socket.on('media:producerSendChange', (data: { producerId: string; maxSpatialLayer: number }) => {
+        const producer = producersRef.current.get(data.producerId);
+        if (!producer || producer.kind !== 'video') return;
+        producer.setMaxSpatialLayer(data.maxSpatialLayer).catch(() => {});
+      });
+
+      socket.on('media:producerClosed', (data: { producerId: string }) => {
+        consumedProducerIds.current.delete(data.producerId);
+        for (const [consumerId, consumer] of consumersRef.current) {
+          if (consumer.producerId === data.producerId) {
+            consumer.close();
+            consumersRef.current.delete(consumerId);
+          }
+        }
+        useRoomStore.getState().removeConsumersByProducerId(data.producerId);
+      });
+
+      // Consume producers present at join + any that arrived while we were setting up.
+      for (const producer of result.existingProducers) consumeOnce(producer.producerId);
+      for (const id of earlyProducers) consumeOnce(id);
 
       const shouldStreamCurrent = selectedCameras.has(deviceId || '');
 
@@ -261,33 +306,6 @@ export function RoomPage() {
         }
       }
 
-      for (const producer of result.existingProducers) {
-        await consume(producer.producerId);
-      }
-
-      socket.on('media:newProducer', async (data: ProducerInfo) => {
-        await consume(data.producerId);
-      });
-
-      // dynacast: cap how many simulcast layers we send to what viewers watch.
-      // setMaxSpatialLayer caps the RTCRtpSender without disabling the track, so
-      // our own self-view stays live.
-      socket.on('media:producerSendChange', (data: { producerId: string; maxSpatialLayer: number }) => {
-        const producer = producersRef.current.get(data.producerId);
-        if (!producer || producer.kind !== 'video') return;
-        producer.setMaxSpatialLayer(data.maxSpatialLayer).catch(() => {});
-      });
-
-      socket.on('media:producerClosed', (data: { producerId: string }) => {
-        for (const [consumerId, consumer] of consumersRef.current) {
-          if (consumer.producerId === data.producerId) {
-            consumer.close();
-            consumersRef.current.delete(consumerId);
-          }
-        }
-        useRoomStore.getState().removeConsumersByProducerId(data.producerId);
-      });
-
       playSound('join');
       setConnecting(false);
       setPhase('inRoom');
@@ -304,6 +322,7 @@ export function RoomPage() {
     return () => {
       // Don't stop always-on camera tracks - they belong to the app
       cleanupMedia();
+      consumedProducerIds.current.clear();
       disconnect();
       clearRoom();
       resetDevice();
@@ -509,46 +528,48 @@ export function RoomPage() {
       return <LoadingScreen message="방 정보를 가져오는 중..." />;
     }
 
-    function DeviceIcon({ type }: { type: string }) {
-      switch (type) {
-        case 'phone': return <Smartphone size={18} />;
-        case 'tablet': return <Tablet size={18} />;
-        case 'desktop': return <Monitor size={18} />;
-        default: return <Camera size={18} />;
-      }
-    }
+    const lobbyCameras = [...cameras].sort(
+      (a, b) => Number(b.isCurrentDevice) - Number(a.isCurrentDevice)
+    );
 
     return (
       <div className="min-h-screen bg-dark-900 flex flex-col items-center justify-center px-6 py-8">
         <div className="w-full max-w-md space-y-6">
           <h2 className="text-xl font-display font-bold text-center">방 입장 준비</h2>
 
-          {/* Camera preview */}
-          <div className="relative aspect-video bg-dark-800 rounded-xl overflow-hidden">
-            {previewStream && lobbyCamOn ? (
-              <video
-                ref={previewRef}
-                autoPlay
-                muted
-                playsInline
-                className="w-full h-full object-cover mirror"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center">
-                <div className="w-20 h-20 rounded-full bg-dark-700 flex items-center justify-center text-3xl font-bold text-white/30">
-                  {nickname?.[0]?.toUpperCase()}
-                </div>
+          {/* My cameras — live preview grid, tap to choose which join the room */}
+          {lobbyCameras.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-white/40 uppercase tracking-wider mb-3">
+                내 카메라 · 가져올 카메라를 선택하세요
+              </h3>
+              <div className="grid grid-cols-2 gap-3">
+                {lobbyCameras.map((cam) => (
+                  <CameraPreviewTile
+                    key={cam.id}
+                    camId={cam.id}
+                    cameraName={cam.cameraName}
+                    deviceType={cam.deviceType}
+                    isOnline={cam.isOnline}
+                    isCurrentDevice={cam.isCurrentDevice}
+                    localStream={cam.isCurrentDevice && lobbyCamOn ? previewStream : null}
+                    selected={selectedCameras.has(cam.id)}
+                    disabled={!cam.isOnline && !cam.isCurrentDevice}
+                    onToggle={() => toggleCamera(cam.id)}
+                  />
+                ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
 
-          {/* Mic / Cam toggles */}
+          {/* This device's mic / cam intent */}
           <div className="flex justify-center gap-4">
             <button
               onClick={() => setLobbyMicOn(!lobbyMicOn)}
               className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
                 lobbyMicOn ? 'bg-dark-700 text-white' : 'bg-danger text-white'
               }`}
+              title={lobbyMicOn ? '마이크 켜짐' : '마이크 꺼짐'}
             >
               {lobbyMicOn ? <Mic size={20} /> : <MicOff size={20} />}
             </button>
@@ -557,60 +578,11 @@ export function RoomPage() {
               className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
                 lobbyCamOn ? 'bg-dark-700 text-white' : 'bg-danger text-white'
               }`}
+              title={lobbyCamOn ? '카메라 켜짐' : '카메라 꺼짐'}
             >
               {lobbyCamOn ? <Video size={20} /> : <VideoOff size={20} />}
             </button>
           </div>
-
-          {/* Camera list */}
-          {cameras.length > 0 && (
-            <div>
-              <h3 className="text-sm font-semibold text-white/40 uppercase tracking-wider mb-3">
-                내 카메라
-              </h3>
-              <div className="space-y-2">
-                {cameras.map((cam) => {
-                  const isSelected = selectedCameras.has(cam.id);
-                  const isDisabled = !cam.isOnline && !cam.isCurrentDevice;
-
-                  return (
-                    <button
-                      key={cam.id}
-                      onClick={() => !isDisabled && toggleCamera(cam.id)}
-                      disabled={isDisabled}
-                      className={`w-full glass rounded-btn p-3 flex items-center gap-3 transition-colors text-left ${
-                        isDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/5'
-                      } ${isSelected && !isDisabled ? 'border border-primary/50' : 'border border-transparent'}`}
-                    >
-                      <div className="text-white/60"><DeviceIcon type={cam.deviceType} /></div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
-                          {cam.cameraName}
-                          {cam.isCurrentDevice && (
-                            <span className="text-xs text-primary ml-2">(현재 기기)</span>
-                          )}
-                        </p>
-                        <p className="text-xs text-white/30">
-                          {cam.isOnline || cam.isCurrentDevice ? (
-                            <span className="text-green-400">온라인</span>
-                          ) : (
-                            <span>오프라인</span>
-                          )}
-                        </p>
-                      </div>
-                      <div
-                        className={`w-10 h-6 rounded-full transition-colors flex items-center ${
-                          isSelected && !isDisabled ? 'bg-primary justify-end' : 'bg-dark-600 justify-start'
-                        }`}
-                      >
-                        <div className="w-4 h-4 rounded-full bg-white mx-1" />
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
 
           {/* Join button */}
           <Button className="w-full" size="lg" onClick={handleJoinFromLobby}>
