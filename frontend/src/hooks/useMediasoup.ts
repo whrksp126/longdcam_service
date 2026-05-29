@@ -19,6 +19,29 @@ export function useMediasoup() {
   const { setAudioProducerId, setVideoProducerId, setScreenProducerId } = useDeviceStore();
   const { addConsumer, removeConsumer } = useRoomStore();
 
+  // Recover media when the network path drops (e.g. WiFi <-> LTE) by restarting ICE.
+  const attachIceRestart = useCallback((transport: Transport) => {
+    let restarting = false;
+    transport.on('connectionstatechange', async (state) => {
+      if (state === 'failed' || state === 'disconnected') {
+        if (restarting || transport.closed) return;
+        restarting = true;
+        try {
+          const { iceParameters } = await emitWithAck<{ iceParameters: any }>('media:restartIce', {
+            transportId: transport.id,
+          });
+          if (iceParameters && !transport.closed) {
+            await transport.restartIce({ iceParameters });
+          }
+        } catch {
+          // will retry on the next connectionstatechange
+        } finally {
+          restarting = false;
+        }
+      }
+    });
+  }, []);
+
   const loadDevice = useCallback(async () => {
     const { rtpCapabilities } = await emitWithAck<{ rtpCapabilities: RtpCapabilities }>(
       'media:getRouterRtpCapabilities'
@@ -56,9 +79,10 @@ export function useMediasoup() {
         .catch(errback);
     });
 
+    attachIceRestart(transport);
     sendTransportRef.current = transport;
     return transport;
-  }, []);
+  }, [attachIceRestart]);
 
   const createRecvTransport = useCallback(async () => {
     const transportOptions = await emitWithAck<any>('media:createRecvTransport');
@@ -74,9 +98,10 @@ export function useMediasoup() {
         .catch(errback);
     });
 
+    attachIceRestart(transport);
     recvTransportRef.current = transport;
     return transport;
-  }, []);
+  }, [attachIceRestart]);
 
   const produce = useCallback(async (track: MediaStreamTrack, appData: Record<string, unknown> = {}) => {
     if (!sendTransportRef.current) return null;

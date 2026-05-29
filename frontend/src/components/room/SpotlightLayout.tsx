@@ -34,6 +34,8 @@ export function SpotlightLayout({ feeds, spotlightId, onFeedClick }: SpotlightLa
           isMuted={spotlight.isMuted}
           isLocal={spotlight.isLocal}
           isScreen={spotlight.isScreen}
+          consumerId={spotlight.isLocal ? undefined : spotlight.id}
+          layoutId={spotlight.id}
           className="w-full h-full"
         />
       </div>
@@ -51,6 +53,8 @@ export function SpotlightLayout({ feeds, spotlightId, onFeedClick }: SpotlightLa
                 isMuted={feed.isMuted}
                 isLocal={feed.isLocal}
                 isScreen={feed.isScreen}
+                consumerId={feed.isLocal ? undefined : feed.id}
+                layoutId={feed.id}
                 className="w-32 h-24 sm:w-full sm:h-32 shrink-0"
                 onClick={() => onFeedClick?.(feed.id)}
               />

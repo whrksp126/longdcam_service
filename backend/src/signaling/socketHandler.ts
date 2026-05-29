@@ -24,7 +24,48 @@ function getRoomParticipants(roomId: string): Map<string, Participant> {
   return roomParticipants.get(roomId)!;
 }
 
+// --- Watch-together (theater) shared playback state per room ---
+interface TheaterSource {
+  type: 'youtube' | 'video';
+  src: string;
+  title?: string;
+}
+interface TheaterState {
+  source: TheaterSource;
+  playing: boolean;
+  time: number; // seconds, as of lastUpdate
+  lastUpdate: number; // Date.now()
+  hostKey: string | null; // `${userId}:${deviceId}` of the controller, null = open
+}
+
+const roomTheater = new Map<string, TheaterState>();
+
+function currentTheaterTime(s: TheaterState): number {
+  return s.playing ? s.time + (Date.now() - s.lastUpdate) / 1000 : s.time;
+}
+
+function theaterPayload(s: TheaterState) {
+  return {
+    source: s.source,
+    playing: s.playing,
+    time: currentTheaterTime(s),
+    hostKey: s.hostKey,
+  };
+}
+
 export function setupSocketHandlers(io: Server) {
+  // dynacast: cap the publisher's sent simulcast layers to what viewers actually watch.
+  mediasoupManager.on('producerSendChange', ({ roomId, producerId, maxSpatialLayer }) => {
+    const participants = roomParticipants.get(roomId);
+    if (!participants) return;
+    for (const p of participants.values()) {
+      if (p.producerIds.includes(producerId)) {
+        io.to(p.socketId).emit('media:producerSendChange', { producerId, maxSpatialLayer });
+        break;
+      }
+    }
+  });
+
   io.use((socket, next) => {
     try {
       const token = socket.handshake.auth.token;
@@ -369,6 +410,16 @@ export function setupSocketHandlers(io: Server) {
       }
     });
 
+    socket.on('media:restartIce', async ({ transportId }, callback) => {
+      try {
+        if (!currentRoomId) return callback({ error: 'Not in a room' });
+        const iceParameters = await mediasoupManager.restartIce(currentRoomId, transportId);
+        callback({ iceParameters });
+      } catch (err: any) {
+        callback({ error: err.message });
+      }
+    });
+
     socket.on('media:connectTransport', async ({ transportId, dtlsParameters }, callback) => {
       try {
         console.log(`[media:connectTransport] ${user.nickname}:${deviceId} transport=${transportId.slice(0,8)} room=${currentRoomId}`);
@@ -507,6 +558,53 @@ export function setupSocketHandlers(io: Server) {
       await mediasoupManager.setPreferredLayers(currentRoomId, consumerId, spatialLayer, temporalLayer);
     });
 
+    // --- Watch-together (theater) ---
+    const theaterKey = () => `${user.userId}:${deviceId}`;
+
+    socket.on('theater:start', ({ source }: { source: TheaterSource }, callback) => {
+      if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+      if (!source?.src || (source.type !== 'youtube' && source.type !== 'video')) {
+        return callback?.({ error: 'Invalid source' });
+      }
+      const state: TheaterState = {
+        source,
+        playing: false,
+        time: 0,
+        lastUpdate: Date.now(),
+        hostKey: theaterKey(),
+      };
+      roomTheater.set(currentRoomId, state);
+      io.to(currentRoomId).emit('theater:state', theaterPayload(state));
+      callback?.({ success: true });
+    });
+
+    socket.on('theater:control', ({ action, time }: { action: 'play' | 'pause' | 'seek'; time?: number }) => {
+      if (!currentRoomId) return;
+      const state = roomTheater.get(currentRoomId);
+      if (!state) return;
+      if (state.hostKey && state.hostKey !== theaterKey()) return; // only host controls
+      if (state.hostKey === null) state.hostKey = theaterKey(); // open -> takeover
+      if (typeof time === 'number') state.time = time;
+      if (action === 'play') state.playing = true;
+      else if (action === 'pause') state.playing = false;
+      state.lastUpdate = Date.now();
+      io.to(currentRoomId).emit('theater:state', theaterPayload(state));
+    });
+
+    socket.on('theater:stop', () => {
+      if (!currentRoomId) return;
+      const state = roomTheater.get(currentRoomId);
+      if (state?.hostKey && state.hostKey !== theaterKey()) return;
+      roomTheater.delete(currentRoomId);
+      io.to(currentRoomId).emit('theater:state', null);
+    });
+
+    socket.on('theater:getState', (_: unknown, callback) => {
+      if (!currentRoomId) return callback?.({ state: null });
+      const state = roomTheater.get(currentRoomId);
+      callback?.({ state: state ? theaterPayload(state) : null });
+    });
+
     socket.on('room:leave', () => {
       handleRoomLeave();
     });
@@ -551,9 +649,16 @@ export function setupSocketHandlers(io: Server) {
         roomSlug: null,
       });
 
+      // Theater: release host so others can take over; clear state if room empties.
+      const theater = roomTheater.get(currentRoomId!);
+      if (theater?.hostKey === key) {
+        theater.hostKey = null;
+      }
+
       if (participants.size === 0) {
         mediasoupManager.closeRoom(currentRoomId!);
         roomParticipants.delete(currentRoomId!);
+        roomTheater.delete(currentRoomId!);
       }
 
       socket.leave(currentRoomId!);

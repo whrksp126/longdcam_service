@@ -1,6 +1,7 @@
 import { useRef, useEffect, memo } from 'react';
 import { motion } from 'framer-motion';
-import { MicOff, Monitor } from 'lucide-react';
+import { MicOff, Monitor, Signal, SignalLow } from 'lucide-react';
+import { useAdaptiveQuality } from '../../hooks/useAdaptiveQuality';
 
 interface FeedCardProps {
   track: MediaStreamTrack | null;
@@ -9,6 +10,10 @@ interface FeedCardProps {
   isMuted?: boolean;
   isLocal?: boolean;
   isScreen?: boolean;
+  /** Remote consumer id — enables adaptive quality + HD indicator. Omit for local feeds. */
+  consumerId?: string;
+  /** Stable feed id — drives shared-element layout morph across layout modes. */
+  layoutId?: string;
   className?: string;
   onClick?: () => void;
 }
@@ -20,10 +25,14 @@ export const FeedCard = memo(function FeedCard({
   isMuted,
   isLocal,
   isScreen,
+  consumerId,
+  layoutId,
   className = '',
   onClick,
 }: FeedCardProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const quality = useAdaptiveQuality(consumerId, rootRef, !isLocal && !!consumerId && !!track);
 
   useEffect(() => {
     if (!videoRef.current || !track) return;
@@ -31,11 +40,17 @@ export const FeedCard = memo(function FeedCard({
     videoRef.current.srcObject = stream;
   }, [track]);
 
+  const showQuality = !isLocal && !!consumerId && !!track;
+
   return (
     <motion.div
+      ref={rootRef}
+      layout
+      layoutId={layoutId}
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ type: 'spring', stiffness: 350, damping: 32 }}
       className={`feed-card relative group cursor-pointer ${className}`}
       onClick={onClick}
     >
@@ -53,6 +68,21 @@ export const FeedCard = memo(function FeedCard({
             {label[0]?.toUpperCase()}
           </div>
         </div>
+      )}
+
+      {/* Quality indicator (adaptive layer) */}
+      {showQuality && quality !== 'paused' && (
+        <motion.div
+          key={quality}
+          initial={{ opacity: 0, scale: 0.8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className={`absolute top-2 right-2 z-10 rounded-full px-1.5 py-0.5 flex items-center gap-1 text-[10px] font-semibold backdrop-blur-sm ${
+            quality === 'high' ? 'bg-secondary/80 text-dark-900' : 'bg-black/50 text-white/70'
+          }`}
+        >
+          {quality === 'high' ? <Signal size={11} /> : <SignalLow size={11} />}
+          {quality === 'high' ? 'HD' : 'SD'}
+        </motion.div>
       )}
 
       {/* Overlay */}

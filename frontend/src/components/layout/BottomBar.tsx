@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import {
   Mic, MicOff, Video, VideoOff, MonitorUp, MonitorOff,
-  LayoutGrid, Maximize2, GalleryHorizontalEnd, PhoneOff, Cctv,
+  LayoutGrid, Maximize2, GalleryHorizontalEnd, PhoneOff, Cctv, Clapperboard,
 } from 'lucide-react';
 import { useDeviceStore } from '../../stores/deviceStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -14,6 +14,8 @@ interface BottomBarProps {
   onLeave: () => void;
   onSwitchLayout: () => void;
   onOpenCameraPanel?: () => void;
+  onOpenTheater?: () => void;
+  isTheaterActive?: boolean;
 }
 
 const layoutIcons: Record<string, typeof LayoutGrid> = {
@@ -22,7 +24,7 @@ const layoutIcons: Record<string, typeof LayoutGrid> = {
   carousel: GalleryHorizontalEnd,
 };
 
-export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, onSwitchLayout, onOpenCameraPanel }: BottomBarProps) {
+export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, onSwitchLayout, onOpenCameraPanel, onOpenTheater, isTheaterActive }: BottomBarProps) {
   const { isMicOn, isCamOn, isScreenSharing } = useDeviceStore();
   const { layoutMode } = useUIStore();
 
@@ -70,6 +72,17 @@ export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, o
             title="카메라 관리"
           >
             <Cctv size={20} />
+          </motion.button>
+        )}
+
+        {onOpenTheater && (
+          <motion.button
+            whileTap={{ scale: 0.85 }}
+            onClick={() => { onOpenTheater(); playSound('toggle'); }}
+            className={`btn-icon ${isTheaterActive ? 'bg-primary text-white hover:bg-primary-hover' : 'bg-dark-600 hover:bg-dark-500'}`}
+            title="함께보기"
+          >
+            <Clapperboard size={20} />
           </motion.button>
         )}
 

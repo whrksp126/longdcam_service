@@ -101,4 +101,10 @@ export const api = {
     request<{ inviteToken: string; expiresAt: string }>(`/api/rooms/${slug}/invite`, {
       method: 'POST',
     }),
+
+  getMediaLibrary: () =>
+    request<{ items: { key: string; name: string; size: number }[] }>('/api/media/library'),
+
+  getMediaUrl: (key: string) =>
+    request<{ url: string }>(`/api/media/library/url?key=${encodeURIComponent(key)}`),
 };

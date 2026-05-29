@@ -6,6 +6,7 @@ build/
 .env.dev
 .env.stg
 *.log
+*.tsbuildinfo
 .DS_Store
 coverage/
 .vite/

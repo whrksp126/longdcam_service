@@ -72,6 +72,7 @@ export function CarouselLayout({ feeds }: CarouselLayoutProps) {
             isMuted={current.isMuted}
             isLocal={current.isLocal}
             isScreen={current.isScreen}
+            consumerId={current.isLocal ? undefined : current.id}
             className="w-full h-full rounded-none"
           />
         </motion.div>

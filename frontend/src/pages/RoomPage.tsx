@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, LayoutGroup } from 'framer-motion';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useSocket } from '../hooks/useSocket';
 import { useMediasoup } from '../hooks/useMediasoup';
@@ -18,6 +19,8 @@ import { BottomBar } from '../components/layout/BottomBar';
 import { ReconnectingOverlay } from '../components/connection/ReconnectingOverlay';
 import { LoadingScreen } from '../components/common/LoadingScreen';
 import { CameraControlPanel } from '../components/room/CameraControlPanel';
+import { TheaterMode } from '../components/room/TheaterMode';
+import { useWatchSync } from '../hooks/useWatchSync';
 import { Button } from '../components/common/Button';
 import { showToast } from '../components/common/Toast';
 import { Smartphone, Tablet, Monitor, Camera, Mic, MicOff, Video, VideoOff } from 'lucide-react';
@@ -46,6 +49,25 @@ export function RoomPage() {
     produce, consume, closeProducer, cleanup: cleanupMedia,
     producersRef, consumersRef,
   } = useMediasoup();
+
+  const { theater, isHost, start: startTheater, stop: stopTheater, control: theaterControl } = useWatchSync();
+  const [theaterPanelOpen, setTheaterPanelOpen] = useState(false);
+  const [theaterHidden, setTheaterHidden] = useState(false);
+
+  // When someone starts a session, surface it for everyone.
+  useEffect(() => {
+    if (theater) {
+      setTheaterHidden(false);
+      setTheaterPanelOpen(false);
+    }
+  }, [!!theater]);
+
+  const showTheater = !theaterHidden && (!!theater || theaterPanelOpen);
+
+  const handleOpenTheater = useCallback(() => {
+    if (theater) setTheaterHidden((h) => !h);
+    else setTheaterPanelOpen(true);
+  }, [theater]);
 
   const [phase, setPhase] = useState<RoomPhase>('lobby');
   const [showCameraPanel, setShowCameraPanel] = useState(false);
@@ -245,6 +267,15 @@ export function RoomPage() {
 
       socket.on('media:newProducer', async (data: ProducerInfo) => {
         await consume(data.producerId);
+      });
+
+      // dynacast: cap how many simulcast layers we send to what viewers watch.
+      // setMaxSpatialLayer caps the RTCRtpSender without disabling the track, so
+      // our own self-view stays live.
+      socket.on('media:producerSendChange', (data: { producerId: string; maxSpatialLayer: number }) => {
+        const producer = producersRef.current.get(data.producerId);
+        if (!producer || producer.kind !== 'video') return;
+        producer.setMaxSpatialLayer(data.maxSpatialLayer).catch(() => {});
       });
 
       socket.on('media:producerClosed', (data: { producerId: string }) => {
@@ -608,23 +639,38 @@ export function RoomPage() {
       <TopBar />
 
       <div className="flex-1 pt-16 pb-20">
-        {layoutMode === 'grid' && (
-          <GridLayout
-            feeds={feeds}
-            onFeedClick={(id) => {
-              setLayoutMode('spotlight');
-              setSpotlightProducer(id);
-            }}
-          />
-        )}
-        {layoutMode === 'spotlight' && (
-          <SpotlightLayout
-            feeds={feeds}
-            spotlightId={spotlightProducerId}
-            onFeedClick={(id) => setSpotlightProducer(id)}
-          />
-        )}
-        {layoutMode === 'carousel' && <CarouselLayout feeds={feeds} />}
+        <LayoutGroup>
+          {layoutMode === 'grid' && (
+            <GridLayout
+              feeds={feeds}
+              onFeedClick={(id) => {
+                setLayoutMode('spotlight');
+                setSpotlightProducer(id);
+              }}
+            />
+          )}
+          {layoutMode === 'spotlight' && (
+            <SpotlightLayout
+              feeds={feeds}
+              spotlightId={spotlightProducerId}
+              onFeedClick={(id) => setSpotlightProducer(id)}
+            />
+          )}
+          {layoutMode === 'carousel' && <CarouselLayout feeds={feeds} />}
+        </LayoutGroup>
+
+        <AnimatePresence>
+          {showTheater && (
+            <TheaterMode
+              theater={theater}
+              isHost={isHost}
+              onStart={(source) => startTheater(source).catch(() => showToast('함께보기를 시작할 수 없습니다', 'error'))}
+              onStop={() => { stopTheater(); setTheaterPanelOpen(false); }}
+              onControl={theaterControl}
+              onClose={() => (theater ? setTheaterHidden(true) : setTheaterPanelOpen(false))}
+            />
+          )}
+        </AnimatePresence>
       </div>
 
       <BottomBar
@@ -634,6 +680,8 @@ export function RoomPage() {
         onLeave={handleLeave}
         onSwitchLayout={handleSwitchLayout}
         onOpenCameraPanel={() => setShowCameraPanel(true)}
+        onOpenTheater={handleOpenTheater}
+        isTheaterActive={!!theater}
       />
 
       <CameraControlPanel

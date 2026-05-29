@@ -41,6 +41,8 @@ export function GridLayout({ feeds, onFeedClick }: GridLayoutProps) {
             isMuted={feed.isMuted}
             isLocal={feed.isLocal}
             isScreen={feed.isScreen}
+            consumerId={feed.isLocal ? undefined : feed.id}
+            layoutId={feed.id}
             onClick={() => onFeedClick?.(feed.id)}
           />
         ))}

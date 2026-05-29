@@ -1,5 +1,6 @@
 import * as mediasoup from 'mediasoup';
 import { types as mediasoupTypes } from 'mediasoup';
+import { EventEmitter } from 'events';
 import { mediasoupConfig } from '../config/mediasoup';
 
 interface RoomMedia {
@@ -7,9 +8,25 @@ interface RoomMedia {
   transports: Map<string, mediasoupTypes.WebRtcTransport>;
   producers: Map<string, mediasoupTypes.Producer>;
   consumers: Map<string, mediasoupTypes.Consumer>;
+  // --- dynacast bookkeeping (video producers only) ---
+  /** producerId -> (resumed consumerId -> its preferred spatial layer) */
+  producerDemand: Map<string, Map<string, number>>;
+  /** producerId -> whether the publisher wants it on (cam/mic toggle) */
+  publisherActive: Map<string, boolean>;
+  /** producerId -> last signalled max spatial layer the publisher should send */
+  producerMaxLayer: Map<string, number>;
 }
 
-class MediasoupManager {
+const MAX_SPATIAL_LAYER = 2; // matches simulcastEncodings (r0/r1/r2)
+
+/**
+ * Emits `producerSendChange` { roomId, producerId, maxSpatialLayer } telling the
+ * publishing client to cap how many simulcast layers it sends (dynacast).
+ * We cap layers via the publisher's RTCRtpSender (setMaxSpatialLayer) rather than
+ * pausing the producer, so the publisher's own self-view track stays live while
+ * uplink for layers nobody watches is dropped.
+ */
+class MediasoupManager extends EventEmitter {
   private workers: mediasoupTypes.Worker[] = [];
   private nextWorkerIdx = 0;
   private rooms: Map<string, RoomMedia> = new Map();
@@ -68,6 +85,9 @@ class MediasoupManager {
       transports: new Map(),
       producers: new Map(),
       consumers: new Map(),
+      producerDemand: new Map(),
+      publisherActive: new Map(),
+      producerMaxLayer: new Map(),
     };
 
     this.rooms.set(roomId, room);
@@ -109,6 +129,14 @@ class MediasoupManager {
     };
   }
 
+  async restartIce(roomId: string, transportId: string) {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error('Room not found');
+    const transport = room.transports.get(transportId);
+    if (!transport) throw new Error('Transport not found');
+    return transport.restartIce();
+  }
+
   async connectTransport(roomId: string, transportId: string, dtlsParameters: mediasoupTypes.DtlsParameters) {
     const room = this.rooms.get(roomId);
     if (!room) throw new Error('Room not found');
@@ -135,12 +163,42 @@ class MediasoupManager {
     const producer = await transport.produce({ kind, rtpParameters, appData });
 
     room.producers.set(producer.id, producer);
+    room.publisherActive.set(producer.id, true);
+    room.producerDemand.set(producer.id, new Map());
+    room.producerMaxLayer.set(producer.id, MAX_SPATIAL_LAYER);
 
     producer.on('transportclose', () => {
       room.producers.delete(producer.id);
+      this.cleanupProducerBookkeeping(room, producer.id);
     });
 
     return producer;
+  }
+
+  /** Recompute the highest spatial layer anyone is watching, and signal on change. */
+  private reconcileProducer(roomId: string, room: RoomMedia, producerId: string) {
+    const producer = room.producers.get(producerId);
+    if (!producer || producer.kind !== 'video') return;
+
+    const publisherActive = room.publisherActive.get(producerId) !== false;
+    const demand = room.producerDemand.get(producerId);
+
+    let maxLayer = 0;
+    if (publisherActive && demand && demand.size > 0) {
+      for (const layer of demand.values()) {
+        if (layer > maxLayer) maxLayer = layer;
+      }
+    }
+
+    if (room.producerMaxLayer.get(producerId) === maxLayer) return;
+    room.producerMaxLayer.set(producerId, maxLayer);
+    this.emit('producerSendChange', { roomId, producerId, maxSpatialLayer: maxLayer });
+  }
+
+  private cleanupProducerBookkeeping(room: RoomMedia, producerId: string) {
+    room.producerDemand.delete(producerId);
+    room.publisherActive.delete(producerId);
+    room.producerMaxLayer.delete(producerId);
   }
 
   async consume(
@@ -167,13 +225,16 @@ class MediasoupManager {
 
     room.consumers.set(consumer.id, consumer);
 
-    consumer.on('transportclose', () => {
+    const dropDemand = () => {
       room.consumers.delete(consumer.id);
-    });
+      const map = room.producerDemand.get(producerId);
+      if (map?.delete(consumer.id)) {
+        this.reconcileProducer(roomId, room, producerId);
+      }
+    };
 
-    consumer.on('producerclose', () => {
-      room.consumers.delete(consumer.id);
-    });
+    consumer.on('transportclose', dropDemand);
+    consumer.on('producerclose', dropDemand);
 
     return consumer;
   }
@@ -186,38 +247,66 @@ class MediasoupManager {
     if (producer) {
       producer.close();
       room.producers.delete(producerId);
+      this.cleanupProducerBookkeeping(room, producerId);
     }
   }
 
+  // Publisher intent (camera/mic toggle): pauses server forwarding AND feeds dynacast.
   async pauseProducer(roomId: string, producerId: string) {
     const room = this.rooms.get(roomId);
     const producer = room?.producers.get(producerId);
-    if (producer) await producer.pause();
+    if (!room || !producer) return;
+    room.publisherActive.set(producerId, false);
+    await producer.pause();
+    this.reconcileProducer(roomId, room, producerId);
   }
 
   async resumeProducer(roomId: string, producerId: string) {
     const room = this.rooms.get(roomId);
     const producer = room?.producers.get(producerId);
-    if (producer) await producer.resume();
+    if (!room || !producer) return;
+    room.publisherActive.set(producerId, true);
+    await producer.resume();
+    this.reconcileProducer(roomId, room, producerId);
   }
 
   async pauseConsumer(roomId: string, consumerId: string) {
     const room = this.rooms.get(roomId);
     const consumer = room?.consumers.get(consumerId);
-    if (consumer) await consumer.pause();
+    if (!room || !consumer) return;
+    await consumer.pause();
+    const map = room.producerDemand.get(consumer.producerId);
+    if (map?.delete(consumerId)) {
+      this.reconcileProducer(roomId, room, consumer.producerId);
+    }
   }
 
   async resumeConsumer(roomId: string, consumerId: string) {
     const room = this.rooms.get(roomId);
     const consumer = room?.consumers.get(consumerId);
-    if (consumer) await consumer.resume();
+    if (!room || !consumer) return;
+    await consumer.resume();
+    let map = room.producerDemand.get(consumer.producerId);
+    if (!map) {
+      map = new Map();
+      room.producerDemand.set(consumer.producerId, map);
+    }
+    if (!map.has(consumerId)) {
+      map.set(consumerId, MAX_SPATIAL_LAYER);
+      this.reconcileProducer(roomId, room, consumer.producerId);
+    }
   }
 
   async setPreferredLayers(roomId: string, consumerId: string, spatialLayer: number, temporalLayer?: number) {
     const room = this.rooms.get(roomId);
     const consumer = room?.consumers.get(consumerId);
-    if (consumer && consumer.type === 'simulcast') {
-      await consumer.setPreferredLayers({ spatialLayer, temporalLayer });
+    if (!room || !consumer || consumer.type !== 'simulcast') return;
+    await consumer.setPreferredLayers({ spatialLayer, temporalLayer });
+    // Feed dynacast: a watcher only wanting layer 0 lets the publisher drop higher layers.
+    const map = room.producerDemand.get(consumer.producerId);
+    if (map?.has(consumerId)) {
+      map.set(consumerId, spatialLayer);
+      this.reconcileProducer(roomId, room, consumer.producerId);
     }
   }
 
