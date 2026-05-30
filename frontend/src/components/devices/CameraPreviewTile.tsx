@@ -30,10 +30,16 @@ interface CameraPreviewTileProps {
   onToggle: () => void;
 }
 
+type CurrentState = 'live' | 'muted' | 'no_camera' | 'failed' | 'connecting';
+
 /**
- * Selectable camera preview used in the room lobby. The current device reads the
- * always-on camera stream directly from the store (and self-heals by re-starting if the
- * track is missing); other devices pull a live P2P preview. Both support lens switching.
+ * Selectable camera preview used in the room lobby.
+ *
+ * The current device binds the always-on camera stream directly. The `<video>` element is
+ * ALWAYS mounted for the current device (never gated behind status) so its ref is stable and
+ * srcObject can be (re)bound on every stream change — this avoids the mount-order race that
+ * previously left the preview stuck on "연결 중". Track mute/ended are observed live, and a dead
+ * track self-heals by re-acquiring. Other devices pull a live P2P preview.
  */
 export function CameraPreviewTile({
   camId,
@@ -52,6 +58,10 @@ export function CameraPreviewTile({
   const connRef = useRef<PreviewConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<PreviewStatus>('connecting');
+  // Bumped whenever the current device's track changes mute/ended state so the render
+  // re-derives liveness from the (mutated-in-place) MediaStreamTrack.
+  const [, setTick] = useState(0);
+  const healedRef = useRef(false);
 
   // Always-on store (drives the current device's preview + lens list).
   const aoStream = useAlwaysOnCamera((s) => s.stream);
@@ -59,27 +69,72 @@ export function CameraPreviewTile({
   const availableCameras = useAlwaysOnCamera((s) => s.availableCameras);
   const activeCameraId = useAlwaysOnCamera((s) => s.activeCameraId);
 
-  // Current device: make sure the camera is running once.
+  // ---- Current device --------------------------------------------------------------------
+  // Make sure the camera is running (once per camOn flip).
   useEffect(() => {
     if (isCurrentDevice && camOn) useAlwaysOnCamera.getState().start();
   }, [isCurrentDevice, camOn]);
 
-  // Current device: bind the always-on stream; reflect a clear status (no endless "연결 중").
+  // Bind the always-on stream to the (always-mounted) video element.
   useEffect(() => {
     if (!isCurrentDevice) return;
-    if (!camOn) {
-      if (videoRef.current) videoRef.current.srcObject = null;
-      setStatus('no_camera');
+    const v = videoRef.current;
+    if (!v) return;
+    if (camOn && aoStream) {
+      if (v.srcObject !== aoStream) v.srcObject = aoStream;
+      if (v.paused) v.play().catch(() => {});
+    } else if (v.srcObject) {
+      v.srcObject = null;
+    }
+  });
+
+  // Observe the current track's mute/ended so the placeholder reflects reality.
+  useEffect(() => {
+    if (!isCurrentDevice) return;
+    const track = aoStream?.getVideoTracks()[0];
+    if (!track) return;
+    const bump = () => setTick((x) => x + 1);
+    track.addEventListener('mute', bump);
+    track.addEventListener('unmute', bump);
+    track.addEventListener('ended', bump);
+    return () => {
+      track.removeEventListener('mute', bump);
+      track.removeEventListener('unmute', bump);
+      track.removeEventListener('ended', bump);
+    };
+  }, [isCurrentDevice, aoStream]);
+
+  // Derive the current device's state fresh each render (reads live track fields).
+  let currentState: CurrentState = 'connecting';
+  if (isCurrentDevice) {
+    const track = camOn ? aoStream?.getVideoTracks()[0] : undefined;
+    if (!camOn) currentState = 'no_camera';
+    else if (track && track.readyState === 'live' && !track.muted) currentState = 'live';
+    else if (track && track.muted) currentState = 'muted';
+    else if (aoError) currentState = 'failed';
+    else currentState = 'connecting';
+  }
+
+  // Self-heal: a live stream that lost its frames (ended/muted, e.g. camera grabbed during a
+  // page transition) is re-acquired once automatically before falling back to the retry UI.
+  useEffect(() => {
+    if (!isCurrentDevice || !camOn) return;
+    if (currentState === 'live') {
+      healedRef.current = false;
       return;
     }
-    const hasVideo = !!aoStream && aoStream.getVideoTracks().some((t) => t.readyState === 'live');
-    if (videoRef.current) {
-      videoRef.current.srcObject = hasVideo ? aoStream! : null;
-      if (hasVideo) videoRef.current.play().catch(() => {});
+    if (currentState === 'connecting' || currentState === 'muted') {
+      const t = setTimeout(() => {
+        if (!healedRef.current) {
+          healedRef.current = true;
+          useAlwaysOnCamera.getState().start(activeCameraId || undefined);
+        }
+      }, 2500);
+      return () => clearTimeout(t);
     }
-    setStatus(hasVideo ? 'live' : aoError ? 'failed' : 'connecting');
-  }, [isCurrentDevice, camOn, aoStream, aoError]);
+  }, [isCurrentDevice, camOn, currentState, activeCameraId]);
 
+  // ---- Other devices: P2P preview --------------------------------------------------------
   const connectPreview = useCallback(() => {
     connRef.current?.close();
     connRef.current = null;
@@ -96,7 +151,6 @@ export function CameraPreviewTile({
     );
   }, [camId]);
 
-  // Other devices: open a P2P preview while online.
   useEffect(() => {
     if (isCurrentDevice || !isOnline) {
       if (!isOnline) setStatus('connecting');
@@ -115,13 +169,24 @@ export function CameraPreviewTile({
     }
   }, [status, isCurrentDevice]);
 
+  // ---- Shared rendering ------------------------------------------------------------------
   const offline = !isOnline && !isCurrentDevice;
-  const showVideo = status === 'live' && (isCurrentDevice ? camOn : isOnline);
+  // Current device keeps the <video> mounted whenever camOn, so srcObject binding never races.
+  const showVideo = isCurrentDevice ? camOn : status === 'live' && isOnline;
+  // The placeholder overlays the video when the current device has no usable frames.
+  const overlay: CurrentState | 'offline' | 'p2p-connecting' | null = (() => {
+    if (offline) return 'offline';
+    if (isCurrentDevice) return currentState === 'live' ? null : currentState;
+    if (status !== 'live') return 'p2p-connecting';
+    return null;
+  })();
 
   // Lens switching
   const localLensIndex = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
   const lensCount = isCurrentDevice ? availableCameras.length : remoteCameraCount;
   const lensActive = isCurrentDevice ? localLensIndex : remoteCameraActiveIndex;
+  const showLens = (isCurrentDevice ? currentState === 'live' : status === 'live' && isOnline) && lensCount > 1;
+  const showLiveBadge = isCurrentDevice ? currentState === 'live' : status === 'live' && isOnline;
 
   const switchLens = (e: ReactMouseEvent, i: number) => {
     e.stopPropagation();
@@ -135,7 +200,8 @@ export function CameraPreviewTile({
 
   const retry = (e: ReactMouseEvent) => {
     e.stopPropagation();
-    if (isCurrentDevice) useAlwaysOnCamera.getState().start();
+    healedRef.current = false;
+    if (isCurrentDevice) useAlwaysOnCamera.getState().start(activeCameraId || undefined);
     else connectPreview();
   };
 
@@ -149,33 +215,48 @@ export function CameraPreviewTile({
         selected ? 'border-primary' : 'border-transparent'
       } ${offline || disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
     >
-      {showVideo ? (
+      {showVideo && (
         <video
           ref={videoRef}
           autoPlay
           muted
           playsInline
-          className={`w-full h-full object-cover ${isCurrentDevice ? 'scale-x-[-1]' : ''}`}
+          className={`absolute inset-0 w-full h-full object-cover ${isCurrentDevice ? 'scale-x-[-1]' : ''} ${
+            overlay ? 'opacity-0' : 'opacity-100'
+          }`}
         />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center text-white/25">
-          {offline ? (
+      )}
+
+      {overlay && (
+        <div className="absolute inset-0 flex items-center justify-center text-white/25">
+          {overlay === 'offline' ? (
             <div className="text-center">
               <WifiOff className="w-8 h-8 mx-auto mb-1 opacity-40" strokeWidth={1.5} />
               <p className="text-[11px]">오프라인</p>
             </div>
-          ) : status === 'no_camera' ? (
+          ) : overlay === 'no_camera' ? (
             <div className="text-center">
               <Camera className="w-8 h-8 mx-auto mb-1 opacity-50" strokeWidth={1.5} />
               <p className="text-[11px] text-white/40">카메라 꺼짐</p>
             </div>
-          ) : status === 'failed' ? (
+          ) : overlay === 'failed' ? (
             <div className="text-center">
               <button
                 onClick={retry}
                 className="flex items-center gap-1 mx-auto text-[11px] text-primary hover:text-primary-hover"
               >
                 <RefreshCw size={12} /> 다시 시도
+              </button>
+            </div>
+          ) : overlay === 'muted' ? (
+            <div className="text-center">
+              <Camera className="w-8 h-8 mx-auto mb-1 opacity-50" strokeWidth={1.5} />
+              <p className="text-[11px] text-white/40">카메라 사용 중</p>
+              <button
+                onClick={retry}
+                className="mt-1 flex items-center gap-1 mx-auto text-[11px] text-primary hover:text-primary-hover"
+              >
+                <RefreshCw size={11} /> 다시 시도
               </button>
             </div>
           ) : (
@@ -188,7 +269,7 @@ export function CameraPreviewTile({
       )}
 
       {/* LIVE badge */}
-      {showVideo && (
+      {showLiveBadge && (
         <div className="absolute top-2 left-2 flex items-center gap-1 bg-black/50 backdrop-blur-sm rounded-full px-2 py-0.5">
           <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
           <span className="text-[10px] text-white/70">LIVE</span>
@@ -196,7 +277,7 @@ export function CameraPreviewTile({
       )}
 
       {/* Lens switcher */}
-      {showVideo && lensCount > 1 && (
+      {showLens && (
         <div className="absolute bottom-9 right-2 flex bg-black/60 backdrop-blur-sm rounded-full overflow-hidden">
           {Array.from({ length: lensCount }, (_, i) => (
             <span
