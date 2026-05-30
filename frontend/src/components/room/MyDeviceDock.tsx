@@ -4,6 +4,7 @@ import { Smartphone, Tablet, Monitor, Camera, Power, SwitchCamera, Loader2 } fro
 import { useCameraStore } from '../../stores/cameraStore';
 import { useRoomStore } from '../../stores/roomStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useAlwaysOnCamera } from '../../services/alwaysOnCamera';
 import { emitWithAck } from '../../lib/socket';
 import { showToast } from '../common/Toast';
 
@@ -11,6 +12,7 @@ interface MyDeviceDockProps {
   roomSlug: string;
   isCurrentCamOn: boolean;
   onToggleCurrentCam: () => void;
+  onSwitchCurrentCam: () => void;
   localVideoTrack: MediaStreamTrack | null;
 }
 
@@ -46,16 +48,37 @@ function DockVideo({ track, mirror }: { track: MediaStreamTrack; mirror?: boolea
  * current device toggles its local producer; other devices are controlled over the
  * existing camera:* signaling (server only relays to devices owned by the same user).
  */
-export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, localVideoTrack }: MyDeviceDockProps) {
+export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, onSwitchCurrentCam, localVideoTrack }: MyDeviceDockProps) {
   const { cameras, fetchCameras } = useCameraStore();
   const { userId, deviceId } = useAuthStore();
   const consumers = useRoomStore((s) => s.consumers);
   const isReconnecting = useRoomStore((s) => s.isReconnecting);
+  const localLensCount = useAlwaysOnCamera((s) => s.availableCameras.length);
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  // Track which devices we auto-pulled into the room, and which the user explicitly
+  // stopped, so reconnecting devices re-appear but manually-off ones stay off.
+  const autoStartedRef = useRef<Set<string>>(new Set());
+  const manualStopRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     fetchCameras(deviceId);
   }, [deviceId, fetchCameras]);
+
+  // Auto-bring my online devices into the room (e.g. a phone that just reconnected /
+  // refreshed). Respects devices the user explicitly turned off; retries after a device
+  // goes offline and comes back.
+  useEffect(() => {
+    for (const cam of cameras) {
+      if (cam.isCurrentDevice) continue;
+      if (!cam.isOnline) {
+        autoStartedRef.current.delete(cam.id);
+        continue;
+      }
+      if (cam.isInRoom || manualStopRef.current.has(cam.id) || autoStartedRef.current.has(cam.id)) continue;
+      autoStartedRef.current.add(cam.id);
+      emitWithAck('camera:requestStart', { targetDeviceId: cam.id, roomSlug }).catch(() => {});
+    }
+  }, [cameras, roomSlug]);
 
   const setBusy = (id: string, on: boolean) =>
     setBusyIds((prev) => {
@@ -79,8 +102,12 @@ export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, loc
     setBusy(camId, true);
     try {
       if (streaming) {
+        manualStopRef.current.add(camId);
+        autoStartedRef.current.delete(camId);
         await emitWithAck('camera:requestStop', { targetDeviceId: camId });
       } else {
+        manualStopRef.current.delete(camId);
+        autoStartedRef.current.add(camId);
         await emitWithAck('camera:requestStart', { targetDeviceId: camId, roomSlug });
       }
     } catch (err: any) {
@@ -90,7 +117,11 @@ export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, loc
     }
   }
 
-  async function handleSwitch(camId: string) {
+  async function handleSwitch(camId: string, isCurrent: boolean) {
+    if (isCurrent) {
+      onSwitchCurrentCam();
+      return;
+    }
     setBusy(camId, true);
     try {
       await emitWithAck('camera:requestSwitchCamera', { targetDeviceId: camId });
@@ -117,7 +148,9 @@ export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, loc
           const track = trackFor(cam.id);
           const streaming = isCurrent ? isCurrentCamOn && !!localVideoTrack : !!track;
           const busy = busyIds.has(cam.id);
-          const canSwitch = !isCurrent && online && cam.remoteCameraCount > 1;
+          const canSwitch = isCurrent
+            ? streaming && localLensCount > 1
+            : online && cam.remoteCameraCount > 1;
           const reconnecting = isCurrent && isReconnecting;
 
           return (
@@ -153,7 +186,7 @@ export function MyDeviceDock({ roomSlug, isCurrentCamOn, onToggleCurrentCam, loc
                 {/* Switch camera */}
                 {canSwitch && (
                   <button
-                    onClick={() => handleSwitch(cam.id)}
+                    onClick={() => handleSwitch(cam.id, isCurrent)}
                     disabled={busy}
                     className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/55 backdrop-blur-sm flex items-center justify-center text-white/70 hover:text-white disabled:opacity-40"
                     title="카메라 전환"

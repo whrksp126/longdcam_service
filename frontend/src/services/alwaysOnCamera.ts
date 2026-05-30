@@ -78,8 +78,8 @@ export const useAlwaysOnCamera = create<AlwaysOnCameraState>()((set, get) => ({
 
     try {
       const videoConstraints: MediaTrackConstraints = cameraDeviceId
-        ? { deviceId: { exact: cameraDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        : { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' };
+        ? { deviceId: { exact: cameraDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'environment' };
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: videoConstraints,

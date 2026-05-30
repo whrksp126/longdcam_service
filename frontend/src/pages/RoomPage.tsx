@@ -82,9 +82,7 @@ export function RoomPage() {
   const recvReadyRef = useRef(false);
   const earlyProducersRef = useRef<string[]>([]);
 
-  // Lobby state — preview is read reactively from the always-on camera store so a
-  // late-arriving / re-acquired stream is reflected immediately (no stale snapshot).
-  const lobbyPreviewStream = useAlwaysOnCamera((s) => s.stream);
+  // Lobby state
   const [lobbyMicOn, setLobbyMicOn] = useState(true);
   const [lobbyCamOn, setLobbyCamOn] = useState(true);
   const [selectedCameras, setSelectedCameras] = useState<Set<string>>(new Set());
@@ -325,7 +323,7 @@ export function RoomPage() {
           try {
             stream = await navigator.mediaDevices.getUserMedia({
               audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-              video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+              video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' },
             });
           } catch {
             showToast('카메라/마이크 접근이 거부되었습니다', 'error');
@@ -459,6 +457,31 @@ export function RoomPage() {
       }
     }
   }, [setVideoTrack]);
+
+  // Switch the current device's lens in-room: rotate the always-on camera and swap the
+  // live producer's track so the new lens is what others (and the dock) see immediately.
+  const handleSwitchCurrentCam = useCallback(async () => {
+    const ao = useAlwaysOnCamera.getState();
+    const { availableCameras, activeCameraId } = ao;
+    if (availableCameras.length <= 1) return;
+    const idx = availableCameras.findIndex((c) => c.deviceId === activeCameraId);
+    const next = availableCameras[(idx + 1) % availableCameras.length];
+    try {
+      await ao.switchCamera(next.deviceId);
+      const newTrack = useAlwaysOnCamera.getState().stream?.getVideoTracks()[0];
+      const videoProducerId = useDeviceStore.getState().videoInput.producerId;
+      if (newTrack) {
+        if (videoProducerId) {
+          const producer = producersRef.current.get(videoProducerId);
+          if (producer) await producer.replaceTrack({ track: newTrack });
+        }
+        setVideoTrack(newTrack);
+        setLocalVideoTrack(newTrack);
+      }
+    } catch {
+      showToast('카메라 전환에 실패했습니다', 'error');
+    }
+  }, [setVideoTrack, producersRef]);
 
   const handleToggleScreen = useCallback(async () => {
     if (isScreenSharing) {
@@ -611,7 +634,9 @@ export function RoomPage() {
                     deviceType={cam.deviceType}
                     isOnline={cam.isOnline}
                     isCurrentDevice={cam.isCurrentDevice}
-                    localStream={cam.isCurrentDevice && lobbyCamOn ? lobbyPreviewStream : null}
+                    camOn={lobbyCamOn}
+                    remoteCameraCount={cam.remoteCameraCount}
+                    remoteCameraActiveIndex={cam.remoteCameraActiveIndex}
                     selected={selectedCameras.has(cam.id)}
                     disabled={!cam.isOnline && !cam.isCurrentDevice}
                     onToggle={() => toggleCamera(cam.id)}
@@ -715,6 +740,7 @@ export function RoomPage() {
         roomSlug={slug || ''}
         isCurrentCamOn={isCamOn}
         onToggleCurrentCam={handleToggleCam}
+        onSwitchCurrentCam={handleSwitchCurrentCam}
         localVideoTrack={localVideoTrack}
       />
 
