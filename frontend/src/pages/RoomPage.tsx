@@ -8,23 +8,22 @@ import { useDeviceStore } from '../stores/deviceStore';
 import { useUIStore } from '../stores/uiStore';
 import { useAuthStore } from '../stores/authStore';
 import { useCameraStore } from '../stores/cameraStore';
-import { emitWithAck } from '../lib/socket';
+import { emitWithAck, getSocket } from '../lib/socket';
 import { api } from '../lib/api';
 import { useAlwaysOnCamera } from '../services/alwaysOnCamera';
 import { GridLayout } from '../components/room/GridLayout';
 import { SpotlightLayout } from '../components/room/SpotlightLayout';
-import { CarouselLayout } from '../components/room/CarouselLayout';
 import { TopBar } from '../components/layout/TopBar';
 import { BottomBar } from '../components/layout/BottomBar';
 import { ReconnectingOverlay } from '../components/connection/ReconnectingOverlay';
 import { LoadingScreen } from '../components/common/LoadingScreen';
-import { CameraControlPanel } from '../components/room/CameraControlPanel';
+import { MyDeviceDock } from '../components/room/MyDeviceDock';
 import { CameraPreviewTile } from '../components/devices/CameraPreviewTile';
 import { TheaterMode } from '../components/room/TheaterMode';
 import { useWatchSync } from '../hooks/useWatchSync';
 import { Button } from '../components/common/Button';
 import { showToast } from '../components/common/Toast';
-import { Mic, MicOff, Video, VideoOff } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, Users } from 'lucide-react';
 import { initSounds, playSound } from '../lib/sounds';
 import type { Participant, ProducerInfo } from '../types/room';
 
@@ -34,11 +33,11 @@ export function RoomPage() {
   const { slug } = useParams<{ slug: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { nickname, deviceId } = useAuthStore();
+  const { userId, nickname, deviceId } = useAuthStore();
   const {
-    setRoom, clearRoom, setParticipants, setConnecting, isConnecting, consumers,
+    setRoom, clearRoom, setParticipants, setConnecting, isConnecting, consumers, participants,
   } = useRoomStore();
-  const { isMicOn, isCamOn, setVideoTrack, setAudioTrack,
+  const { isCamOn, setVideoTrack, setAudioTrack,
     setScreenSharing, isScreenSharing, setScreenTrack, reset: resetDevice,
   } = useDeviceStore();
   const { layoutMode, setLayoutMode, spotlightProducerId, setSpotlightProducer } = useUIStore();
@@ -71,22 +70,27 @@ export function RoomPage() {
   }, [theater]);
 
   const [phase, setPhase] = useState<RoomPhase>('lobby');
-  const [showCameraPanel, setShowCameraPanel] = useState(false);
+  const [isOwner, setIsOwner] = useState(false);
   const [localVideoTrack, setLocalVideoTrack] = useState<MediaStreamTrack | null>(null);
   const [localScreenTrack, setLocalScreenTrack] = useState<MediaStreamTrack | null>(null);
   const localAudioTrackRef = useRef<MediaStreamTrack | null>(null);
   const joinedRef = useRef(false);
   const consumedProducerIds = useRef<Set<string>>(new Set());
+  // Reconnection bookkeeping (re-establishing transports/producers/consumers).
+  const sessionActiveRef = useRef(false);
+  const reestablishingRef = useRef(false);
+  const recvReadyRef = useRef(false);
+  const earlyProducersRef = useRef<string[]>([]);
 
-  // Lobby state
-  const [previewStream, setPreviewStream] = useState<MediaStream | null>(null);
+  // Lobby state — preview is read reactively from the always-on camera store so a
+  // late-arriving / re-acquired stream is reflected immediately (no stale snapshot).
+  const lobbyPreviewStream = useAlwaysOnCamera((s) => s.stream);
   const [lobbyMicOn, setLobbyMicOn] = useState(true);
   const [lobbyCamOn, setLobbyCamOn] = useState(true);
   const [selectedCameras, setSelectedCameras] = useState<Set<string>>(new Set());
   const [needsPin, setNeedsPin] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [roomJoined, setRoomJoined] = useState(false);
-  const previewRef = useRef<HTMLVideoElement>(null);
 
   // Check if room requires PIN and if we need to join first
   useEffect(() => {
@@ -113,20 +117,12 @@ export function RoomPage() {
     })();
   }, [slug, searchParams]);
 
-  // Use always-on camera for lobby preview
+  // Use always-on camera for lobby preview. start() reuses a live stream or re-acquires
+  // a dead one; the preview itself is read reactively via lobbyPreviewStream.
   useEffect(() => {
     if (phase !== 'lobby' || !roomJoined) return;
-
     fetchCameras(deviceId);
-
-    const alwaysOn = useAlwaysOnCamera.getState();
-    if (alwaysOn.stream && alwaysOn.isActive) {
-      setPreviewStream(alwaysOn.stream);
-    } else {
-      alwaysOn.start().then(() => {
-        setPreviewStream(useAlwaysOnCamera.getState().stream);
-      });
-    }
+    useAlwaysOnCamera.getState().start();
   }, [phase, roomJoined]);
 
   // Initialize selected cameras (all online by default)
@@ -136,13 +132,6 @@ export function RoomPage() {
       setSelectedCameras(onlineCams);
     }
   }, [cameras]);
-
-  // Preview video ref
-  useEffect(() => {
-    if (previewRef.current && previewStream) {
-      previewRef.current.srcObject = previewStream;
-    }
-  }, [previewStream]);
 
   async function handlePinSubmit() {
     if (!slug || !pinInput) return;
@@ -168,7 +157,6 @@ export function RoomPage() {
   }
 
   async function handleJoinFromLobby() {
-    setPreviewStream(null);
     setPhase('connecting');
 
     // Request remote cameras to start
@@ -182,6 +170,126 @@ export function RoomPage() {
     await joinRoom();
   }
 
+  // Consume each producer at most once (existing + new), so we never miss or
+  // double-consume a feed (e.g. another of my devices joining concurrently).
+  const consumeOnce = useCallback((producerId: string) => {
+    if (consumedProducerIds.current.has(producerId)) return;
+    consumedProducerIds.current.add(producerId);
+    consume(producerId).catch(() => consumedProducerIds.current.delete(producerId));
+  }, [consume]);
+
+  // Idempotent room/media socket listeners (re-attachable on reconnect via off→on).
+  const attachRoomListeners = useCallback((socket: ReturnType<typeof getSocket>) => {
+    // Buffer producers that arrive before the recv transport is ready.
+    socket.off('media:newProducer');
+    socket.on('media:newProducer', (data: ProducerInfo) => {
+      if (recvReadyRef.current) consumeOnce(data.producerId);
+      else earlyProducersRef.current.push(data.producerId);
+    });
+
+    // dynacast: cap how many simulcast layers we send to what viewers watch.
+    socket.off('media:producerSendChange');
+    socket.on('media:producerSendChange', (data: { producerId: string; maxSpatialLayer: number }) => {
+      const producer = producersRef.current.get(data.producerId);
+      if (!producer || producer.kind !== 'video') return;
+      producer.setMaxSpatialLayer(data.maxSpatialLayer).catch(() => {});
+    });
+
+    socket.off('media:producerClosed');
+    socket.on('media:producerClosed', (data: { producerId: string }) => {
+      consumedProducerIds.current.delete(data.producerId);
+      for (const [consumerId, consumer] of consumersRef.current) {
+        if (consumer.producerId === data.producerId) {
+          consumer.close();
+          consumersRef.current.delete(consumerId);
+        }
+      }
+      useRoomStore.getState().removeConsumersByProducerId(data.producerId);
+    });
+
+    // Owner ended the room (or it was deleted) → leave gracefully.
+    socket.off('room:closed');
+    socket.on('room:closed', () => {
+      sessionActiveRef.current = false;
+      showToast('방이 종료되었습니다', 'info');
+      navigate('/');
+    });
+  }, [consumeOnce, navigate, producersRef, consumersRef]);
+
+  // Join the room + (re)build transports + consume existing producers. Reused on reconnect.
+  const establishSession = useCallback(async () => {
+    const socket = getSocket();
+    recvReadyRef.current = false;
+    earlyProducersRef.current = [];
+    consumedProducerIds.current.clear();
+    attachRoomListeners(socket);
+
+    const result = await emitWithAck<{
+      participants: Participant[];
+      existingProducers: ProducerInfo[];
+      iceServers: any[];
+      isOwner: boolean;
+    }>('room:join', { roomSlug: slug });
+
+    setRoom(slug!, slug!);
+    setParticipants(result.participants);
+    setIsOwner(!!result.isOwner);
+
+    await loadDevice();
+    await createSendTransport();
+    await createRecvTransport();
+    recvReadyRef.current = true;
+
+    for (const producer of result.existingProducers) consumeOnce(producer.producerId);
+    for (const id of earlyProducersRef.current) consumeOnce(id);
+  }, [slug, attachRoomListeners, consumeOnce, loadDevice, createSendTransport, createRecvTransport,
+    setRoom, setParticipants]);
+
+  // Re-publish whatever this device is currently sharing (used on reconnect).
+  const republishCurrent = useCallback(async () => {
+    const { isMicOn: micOn, isCamOn: camOn, isScreenSharing: screenOn } = useDeviceStore.getState();
+    const alwaysOn = useAlwaysOnCamera.getState();
+    let stream = alwaysOn.stream;
+    if ((camOn || micOn) && (!stream || !stream.active)) {
+      try { await alwaysOn.start(); stream = useAlwaysOnCamera.getState().stream; } catch { /* ignore */ }
+    }
+    if (stream) {
+      const audioTrack = stream.getAudioTracks()[0];
+      const videoTrack = stream.getVideoTracks()[0];
+      if (micOn && audioTrack) {
+        localAudioTrackRef.current = audioTrack;
+        setAudioTrack(audioTrack);
+        await produce(audioTrack, { mediaType: 'audio' });
+      }
+      if (camOn && videoTrack) {
+        setLocalVideoTrack(videoTrack);
+        setVideoTrack(videoTrack);
+        await produce(videoTrack, { mediaType: 'video' });
+      }
+    }
+    const screenTrack = useDeviceStore.getState().screenShare.track;
+    if (screenOn && screenTrack && screenTrack.readyState === 'live') {
+      await produce(screenTrack, { mediaType: 'screen' });
+    }
+  }, [produce, setAudioTrack, setVideoTrack]);
+
+  // Full media rebuild after the socket reconnects (server treated us as fresh).
+  const handleReconnect = useCallback(async () => {
+    if (!sessionActiveRef.current || reestablishingRef.current) return;
+    reestablishingRef.current = true;
+    useRoomStore.getState().setReconnecting(true);
+    try {
+      cleanupMedia();
+      await establishSession();
+      await republishCurrent();
+      useRoomStore.getState().setReconnecting(false);
+    } catch {
+      // Leave the overlay up; the next 'reconnect' tick will retry.
+    } finally {
+      reestablishingRef.current = false;
+    }
+  }, [cleanupMedia, establishSession, republishCurrent]);
+
   const joinRoom = useCallback(async () => {
     if (!slug || joinedRef.current) return;
     joinedRef.current = true;
@@ -191,61 +299,11 @@ export function RoomPage() {
       initSounds();
       const socket = connect();
 
-      const result = await emitWithAck<{
-        participants: Participant[];
-        existingProducers: ProducerInfo[];
-        iceServers: any[];
-      }>('room:join', { roomSlug: slug });
+      // Rebuild media whenever the underlying connection comes back.
+      socket.io.off('reconnect');
+      socket.io.on('reconnect', () => { handleReconnect(); });
 
-      setRoom(slug, slug);
-      setParticipants(result.participants);
-
-      // Consume each producer at most once (existing + new), so we never miss or
-      // double-consume a feed (e.g. another of my devices joining concurrently).
-      const consumeOnce = (producerId: string) => {
-        if (consumedProducerIds.current.has(producerId)) return;
-        consumedProducerIds.current.add(producerId);
-        consume(producerId).catch(() => consumedProducerIds.current.delete(producerId));
-      };
-
-      // Register the producer listener IMMEDIATELY (before our transports/camera are
-      // set up), buffering anything that arrives until the recv transport is ready —
-      // otherwise a fast-joining device's producer slips through the gap and is missed.
-      const earlyProducers: string[] = [];
-      let recvReady = false;
-      socket.on('media:newProducer', (data: ProducerInfo) => {
-        if (recvReady) consumeOnce(data.producerId);
-        else earlyProducers.push(data.producerId);
-      });
-
-      await loadDevice();
-      await createSendTransport();
-      await createRecvTransport();
-      recvReady = true;
-
-      // dynacast: cap how many simulcast layers we send to what viewers watch.
-      // setMaxSpatialLayer caps the RTCRtpSender without disabling the track, so
-      // our own self-view stays live.
-      socket.on('media:producerSendChange', (data: { producerId: string; maxSpatialLayer: number }) => {
-        const producer = producersRef.current.get(data.producerId);
-        if (!producer || producer.kind !== 'video') return;
-        producer.setMaxSpatialLayer(data.maxSpatialLayer).catch(() => {});
-      });
-
-      socket.on('media:producerClosed', (data: { producerId: string }) => {
-        consumedProducerIds.current.delete(data.producerId);
-        for (const [consumerId, consumer] of consumersRef.current) {
-          if (consumer.producerId === data.producerId) {
-            consumer.close();
-            consumersRef.current.delete(consumerId);
-          }
-        }
-        useRoomStore.getState().removeConsumersByProducerId(data.producerId);
-      });
-
-      // Consume producers present at join + any that arrived while we were setting up.
-      for (const producer of result.existingProducers) consumeOnce(producer.producerId);
-      for (const id of earlyProducers) consumeOnce(id);
+      await establishSession();
 
       const shouldStreamCurrent = selectedCameras.has(deviceId || '');
 
@@ -306,6 +364,7 @@ export function RoomPage() {
         }
       }
 
+      sessionActiveRef.current = true;
       playSound('join');
       setConnecting(false);
       setPhase('inRoom');
@@ -314,13 +373,14 @@ export function RoomPage() {
       setConnecting(false);
       navigate('/');
     }
-  }, [slug, connect, loadDevice, createSendTransport, createRecvTransport, produce, consume,
-    setRoom, setParticipants, setConnecting, setAudioTrack, setVideoTrack, navigate,
+  }, [slug, connect, establishSession, handleReconnect, produce,
+    setConnecting, setAudioTrack, setVideoTrack, navigate,
     lobbyMicOn, lobbyCamOn, selectedCameras, deviceId]);
 
   useEffect(() => {
     return () => {
       // Don't stop always-on camera tracks - they belong to the app
+      sessionActiveRef.current = false;
       cleanupMedia();
       consumedProducerIds.current.clear();
       disconnect();
@@ -429,29 +489,38 @@ export function RoomPage() {
   }, [isScreenSharing, localScreenTrack, produce, closeProducer, setScreenTrack, setScreenSharing]);
 
   const handleLeave = useCallback(() => {
+    sessionActiveRef.current = false;
     emitWithAck('room:leave', {}).catch(() => {});
     navigate('/');
   }, [navigate]);
 
+  const handleCloseRoom = useCallback(() => {
+    if (!window.confirm('방을 종료하면 모든 참가자의 연결이 끊깁니다. 종료할까요?')) return;
+    sessionActiveRef.current = false;
+    emitWithAck('room:close', {})
+      .then(() => navigate('/'))
+      .catch((err: any) => showToast(err.message || '방 종료에 실패했습니다', 'error'));
+  }, [navigate]);
+
   const handleSwitchLayout = useCallback(() => {
-    const modes: ('grid' | 'spotlight' | 'carousel')[] = ['grid', 'spotlight', 'carousel'];
+    const modes: ('grid' | 'spotlight')[] = ['grid', 'spotlight'];
     const currentIdx = modes.indexOf(layoutMode);
     setLayoutMode(modes[(currentIdx + 1) % modes.length]);
   }, [layoutMode, setLayoutMode]);
 
+  // userId:deviceId → nickname/deviceLabel, so remote feeds show real names not raw ids.
+  const participantLookup = useMemo(() => {
+    const m = new Map<string, { nickname: string; deviceLabel: string }>();
+    for (const p of participants) {
+      m.set(`${p.userId}:${p.deviceId}`, { nickname: p.nickname, deviceLabel: p.deviceLabel });
+    }
+    return m;
+  }, [participants]);
+
+  // Main area = OTHER participants' camera feeds + any screen share (mine or theirs).
+  // My own device cameras live in the dock, never the main grid.
   const feeds = useMemo(() => {
     const items: any[] = [];
-
-    if (localVideoTrack && isCamOn) {
-      items.push({
-        id: 'local-video',
-        track: localVideoTrack,
-        label: nickname || '나',
-        deviceLabel: '이 기기',
-        isMuted: !isMicOn,
-        isLocal: true,
-      });
-    }
 
     if (localScreenTrack) {
       items.push({
@@ -465,32 +534,22 @@ export function RoomPage() {
     }
 
     for (const consumer of consumers) {
-      if (consumer.kind === 'video') {
-        items.push({
-          id: consumer.consumerId,
-          track: consumer.track,
-          label: consumer.userId,
-          deviceLabel: consumer.deviceId,
-          isMuted: false,
-          isLocal: false,
-          isScreen: false,
-        });
-      }
-    }
-
-    if (items.length === 0 && !isCamOn) {
+      if (consumer.kind !== 'video') continue;
+      if (consumer.userId === userId) continue; // my own devices → dock
+      const info = participantLookup.get(`${consumer.userId}:${consumer.deviceId}`);
       items.push({
-        id: 'local-placeholder',
-        track: null,
-        label: nickname || '나',
-        deviceLabel: '카메라 꺼짐',
-        isMuted: !isMicOn,
-        isLocal: true,
+        id: consumer.consumerId,
+        track: consumer.track,
+        label: info?.nickname || '참가자',
+        deviceLabel: info?.deviceLabel || '',
+        isMuted: false,
+        isLocal: false,
+        isScreen: false,
       });
     }
 
     return items;
-  }, [consumers, nickname, isMicOn, isCamOn, localVideoTrack, localScreenTrack]);
+  }, [consumers, participantLookup, nickname, userId, localScreenTrack]);
 
   // --- PIN required screen ---
   if (needsPin) {
@@ -552,7 +611,7 @@ export function RoomPage() {
                     deviceType={cam.deviceType}
                     isOnline={cam.isOnline}
                     isCurrentDevice={cam.isCurrentDevice}
-                    localStream={cam.isCurrentDevice && lobbyCamOn ? previewStream : null}
+                    localStream={cam.isCurrentDevice && lobbyCamOn ? lobbyPreviewStream : null}
                     selected={selectedCameras.has(cam.id)}
                     disabled={!cam.isOnline && !cam.isCurrentDevice}
                     onToggle={() => toggleCamera(cam.id)}
@@ -610,26 +669,33 @@ export function RoomPage() {
     <div className="h-screen w-screen bg-dark-900 flex flex-col overflow-hidden">
       <TopBar />
 
-      <div className="flex-1 pt-16 pb-20">
-        <LayoutGroup>
-          {layoutMode === 'grid' && (
-            <GridLayout
-              feeds={feeds}
-              onFeedClick={(id) => {
-                setLayoutMode('spotlight');
-                setSpotlightProducer(id);
-              }}
-            />
-          )}
-          {layoutMode === 'spotlight' && (
-            <SpotlightLayout
-              feeds={feeds}
-              spotlightId={spotlightProducerId}
-              onFeedClick={(id) => setSpotlightProducer(id)}
-            />
-          )}
-          {layoutMode === 'carousel' && <CarouselLayout feeds={feeds} />}
-        </LayoutGroup>
+      <div className="flex-1 min-h-0 relative">
+        {feeds.length > 0 ? (
+          <LayoutGroup>
+            {layoutMode === 'grid' && (
+              <GridLayout
+                feeds={feeds}
+                onFeedClick={(id) => {
+                  setLayoutMode('spotlight');
+                  setSpotlightProducer(id);
+                }}
+              />
+            )}
+            {layoutMode === 'spotlight' && (
+              <SpotlightLayout
+                feeds={feeds}
+                spotlightId={spotlightProducerId}
+                onFeedClick={(id) => setSpotlightProducer(id)}
+              />
+            )}
+          </LayoutGroup>
+        ) : (
+          <div className="w-full h-full flex flex-col items-center justify-center text-white/30 gap-2 px-6 text-center">
+            <Users size={40} strokeWidth={1.5} />
+            <p className="text-sm">아직 다른 참가자가 없습니다</p>
+            <p className="text-xs text-white/20">내 기기는 아래에서 켜고 끌 수 있어요</p>
+          </div>
+        )}
 
         <AnimatePresence>
           {showTheater && (
@@ -645,21 +711,21 @@ export function RoomPage() {
         </AnimatePresence>
       </div>
 
+      <MyDeviceDock
+        roomSlug={slug || ''}
+        isCurrentCamOn={isCamOn}
+        onToggleCurrentCam={handleToggleCam}
+        localVideoTrack={localVideoTrack}
+      />
+
       <BottomBar
         onToggleMic={handleToggleMic}
-        onToggleCam={handleToggleCam}
         onToggleScreen={handleToggleScreen}
         onLeave={handleLeave}
         onSwitchLayout={handleSwitchLayout}
-        onOpenCameraPanel={() => setShowCameraPanel(true)}
         onOpenTheater={handleOpenTheater}
         isTheaterActive={!!theater}
-      />
-
-      <CameraControlPanel
-        isOpen={showCameraPanel}
-        onClose={() => setShowCameraPanel(false)}
-        currentRoomSlug={slug || ''}
+        onCloseRoom={isOwner ? handleCloseRoom : undefined}
       />
 
       <ReconnectingOverlay />

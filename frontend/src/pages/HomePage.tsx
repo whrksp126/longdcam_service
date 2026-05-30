@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { Trash2 } from 'lucide-react';
 import { Button } from '../components/common/Button';
 import { Modal } from '../components/common/Modal';
 import { showToast } from '../components/common/Toast';
@@ -66,6 +67,17 @@ export function HomePage() {
   function handleShareRoom(room: { slug: string; name: string; hasPin: boolean }) {
     setShareRoom(room);
     setShowShare(true);
+  }
+
+  async function handleDeleteRoom(room: { id: string; name: string; slug: string }) {
+    if (!window.confirm(`'${room.name}' 방을 삭제할까요?\n접속 중인 참가자들의 연결이 종료됩니다.`)) return;
+    try {
+      await api.deleteRoom(room.slug);
+      setRooms((prev) => prev.filter((r) => r.id !== room.id));
+      showToast('방을 삭제했습니다', 'success');
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    }
   }
 
   const roleLabel: Record<string, string> = {
@@ -168,6 +180,18 @@ export function HomePage() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
                           </svg>
                         </button>
+                        {room.role === 'owner' && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteRoom(room);
+                            }}
+                            className="p-2 hover:bg-danger/15 rounded-lg transition-colors group/del"
+                            title="방 삭제"
+                          >
+                            <Trash2 className="w-4 h-4 text-white/40 group-hover/del:text-danger" />
+                          </button>
+                        )}
                         <span className="text-xs text-white/30 bg-dark-700 px-2 py-1 rounded-full">
                           {roleLabel[room.role] || room.role}
                         </span>

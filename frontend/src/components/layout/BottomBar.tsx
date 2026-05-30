@@ -1,7 +1,8 @@
-import { motion } from 'framer-motion';
+import { useState, type ReactNode } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Mic, MicOff, Video, VideoOff, MonitorUp, MonitorOff,
-  LayoutGrid, Maximize2, GalleryHorizontalEnd, PhoneOff, Cctv, Clapperboard,
+  Mic, MicOff, MonitorUp, MonitorOff, LayoutGrid, Maximize2,
+  PhoneOff, Clapperboard, MoreHorizontal, Trash2,
 } from 'lucide-react';
 import { useDeviceStore } from '../../stores/deviceStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -9,34 +10,55 @@ import { playSound } from '../../lib/sounds';
 
 interface BottomBarProps {
   onToggleMic: () => void;
-  onToggleCam: () => void;
   onToggleScreen: () => void;
   onLeave: () => void;
   onSwitchLayout: () => void;
-  onOpenCameraPanel?: () => void;
   onOpenTheater?: () => void;
   isTheaterActive?: boolean;
+  /** Owner only — ends the room for everyone. */
+  onCloseRoom?: () => void;
 }
 
 const layoutIcons: Record<string, typeof LayoutGrid> = {
   grid: LayoutGrid,
   spotlight: Maximize2,
-  carousel: GalleryHorizontalEnd,
 };
 
-export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, onSwitchLayout, onOpenCameraPanel, onOpenTheater, isTheaterActive }: BottomBarProps) {
-  const { isMicOn, isCamOn, isScreenSharing } = useDeviceStore();
+/**
+ * Simplified control bar. Camera on/off lives in MyDeviceDock now (per-device), so this
+ * bar only keeps this-device essentials (mic, leave) up front; everything secondary
+ * (screen share, layout, theater, room delete) is tucked into a "더보기" menu.
+ */
+export function BottomBar({
+  onToggleMic, onToggleScreen, onLeave, onSwitchLayout, onOpenTheater, isTheaterActive, onCloseRoom,
+}: BottomBarProps) {
+  const { isMicOn, isScreenSharing } = useDeviceStore();
   const { layoutMode } = useUIStore();
+  const [moreOpen, setMoreOpen] = useState(false);
 
   const LayoutIcon = layoutIcons[layoutMode] || LayoutGrid;
 
+  const menuItem = (
+    icon: ReactNode, label: string, onClick: () => void, danger?: boolean,
+  ) => (
+    <button
+      onClick={() => { onClick(); setMoreOpen(false); }}
+      className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors hover:bg-white/5 ${
+        danger ? 'text-danger' : 'text-white/80'
+      }`}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+
   return (
     <motion.div
-      initial={{ y: 100 }}
-      animate={{ y: 0 }}
-      className="fixed bottom-0 left-0 right-0 z-40 safe-area-pb"
+      initial={{ y: 60, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      className="shrink-0 safe-area-pb px-3 pb-3 pt-1"
     >
-      <div className="glass-strong mx-3 mb-3 rounded-2xl px-4 py-3 flex items-center justify-center gap-3">
+      <div className="glass-strong rounded-2xl px-4 py-3 flex items-center justify-center gap-3">
         <motion.button
           whileTap={{ scale: 0.85 }}
           onClick={() => { onToggleMic(); playSound('toggle'); }}
@@ -48,15 +70,6 @@ export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, o
 
         <motion.button
           whileTap={{ scale: 0.85 }}
-          onClick={() => { onToggleCam(); playSound('toggle'); }}
-          className={`btn-icon ${isCamOn ? 'bg-dark-600 hover:bg-dark-500' : 'bg-danger hover:bg-red-600'}`}
-          title={isCamOn ? '카메라 끄기' : '카메라 켜기'}
-        >
-          {isCamOn ? <Video size={20} /> : <VideoOff size={20} />}
-        </motion.button>
-
-        <motion.button
-          whileTap={{ scale: 0.85 }}
           onClick={onToggleScreen}
           className={`btn-icon ${isScreenSharing ? 'bg-secondary text-dark-900 hover:bg-secondary-hover' : 'bg-dark-600 hover:bg-dark-500'}`}
           title="화면 공유"
@@ -64,36 +77,37 @@ export function BottomBar({ onToggleMic, onToggleCam, onToggleScreen, onLeave, o
           {isScreenSharing ? <MonitorOff size={20} /> : <MonitorUp size={20} />}
         </motion.button>
 
-        {onOpenCameraPanel && (
+        <div className="relative">
           <motion.button
             whileTap={{ scale: 0.85 }}
-            onClick={onOpenCameraPanel}
-            className="btn-icon bg-dark-600 hover:bg-dark-500"
-            title="카메라 관리"
+            onClick={() => setMoreOpen((v) => !v)}
+            className={`btn-icon ${moreOpen ? 'bg-dark-500' : 'bg-dark-600 hover:bg-dark-500'}`}
+            title="더보기"
           >
-            <Cctv size={20} />
+            <MoreHorizontal size={20} />
           </motion.button>
-        )}
 
-        {onOpenTheater && (
-          <motion.button
-            whileTap={{ scale: 0.85 }}
-            onClick={() => { onOpenTheater(); playSound('toggle'); }}
-            className={`btn-icon ${isTheaterActive ? 'bg-primary text-white hover:bg-primary-hover' : 'bg-dark-600 hover:bg-dark-500'}`}
-            title="함께보기"
-          >
-            <Clapperboard size={20} />
-          </motion.button>
-        )}
-
-        <motion.button
-          whileTap={{ scale: 0.85 }}
-          onClick={onSwitchLayout}
-          className="btn-icon bg-dark-600 hover:bg-dark-500"
-          title="레이아웃 변경"
-        >
-          <LayoutIcon size={20} />
-        </motion.button>
+          <AnimatePresence>
+            {moreOpen && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setMoreOpen(false)} />
+                <motion.div
+                  initial={{ opacity: 0, y: 8, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                  className="absolute bottom-14 left-1/2 -translate-x-1/2 z-50 w-44 glass-strong rounded-xl overflow-hidden py-1"
+                >
+                  {menuItem(<LayoutIcon size={18} />, '레이아웃 전환', onSwitchLayout)}
+                  {onOpenTheater && menuItem(
+                    <Clapperboard size={18} className={isTheaterActive ? 'text-primary' : ''} />,
+                    '함께보기', onOpenTheater,
+                  )}
+                  {onCloseRoom && menuItem(<Trash2 size={18} />, '방 종료', onCloseRoom, true)}
+                </motion.div>
+              </>
+            )}
+          </AnimatePresence>
+        </div>
 
         <motion.button
           whileTap={{ scale: 0.85 }}

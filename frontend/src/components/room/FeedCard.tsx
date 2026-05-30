@@ -2,6 +2,7 @@ import { useRef, useEffect, memo } from 'react';
 import { motion } from 'framer-motion';
 import { MicOff, Monitor, Signal, SignalLow } from 'lucide-react';
 import { useAdaptiveQuality } from '../../hooks/useAdaptiveQuality';
+import { getSocket } from '../../lib/socket';
 
 interface FeedCardProps {
   track: MediaStreamTrack | null;
@@ -39,6 +40,30 @@ export const FeedCard = memo(function FeedCard({
     const stream = new MediaStream([track]);
     videoRef.current.srcObject = stream;
   }, [track]);
+
+  // Stall recovery: a remote simulcast feed can freeze on a stale frame after a layer
+  // switch (the new layer hasn't sent a keyframe yet). If the video element stops
+  // advancing while it should be playing, ask the SFU to pull a fresh keyframe.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || isLocal || !consumerId || !track) return;
+    let lastTime = -1;
+    let stalls = 0;
+    const iv = setInterval(() => {
+      if (video.paused || video.readyState < 2) return;
+      const t = video.currentTime;
+      if (t === lastTime) {
+        if (++stalls >= 2) {
+          getSocket().emit('media:requestKeyFrame', { consumerId });
+          stalls = 0;
+        }
+      } else {
+        stalls = 0;
+        lastTime = t;
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [consumerId, track, isLocal]);
 
   const showQuality = !isLocal && !!consumerId && !!track;
 

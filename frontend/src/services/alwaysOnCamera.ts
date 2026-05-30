@@ -61,7 +61,12 @@ export const useAlwaysOnCamera = create<AlwaysOnCameraState>()((set, get) => ({
 
   start: async (cameraDeviceId?: string) => {
     const existing = get().stream;
-    if (existing && existing.active && !cameraDeviceId) {
+    // Reuse only if the existing stream still has a LIVE video track. A stream whose
+    // camera track ended (tab backgrounded, device switched, page transition) keeps
+    // `active === true` as long as any track lives, which previously left the lobby
+    // preview bound to a dead track → black screen. Re-acquire in that case.
+    const videoLive = !!existing && existing.getVideoTracks().some((t) => t.readyState === 'live');
+    if (existing && existing.active && videoLive && !cameraDeviceId) {
       set({ isActive: true, error: null });
       return;
     }

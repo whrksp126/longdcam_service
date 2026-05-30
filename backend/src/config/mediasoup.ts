@@ -55,8 +55,8 @@ export const mediasoupConfig = {
         announcedIp: process.env.MEDIASOUP_ANNOUNCED_IP || undefined,
       },
     ],
-    maxIncomingBitrate: 1500000,
-    initialAvailableOutgoingBitrate: 1000000,
+    maxIncomingBitrate: 3500000,
+    initialAvailableOutgoingBitrate: 1500000,
     minimumAvailableOutgoingBitrate: 600000,
     maxSctpMessageSize: 262144,
     enableUdp: true,
@@ -65,8 +65,9 @@ export const mediasoupConfig = {
   },
 };
 
+// Kept in sync with the client-side encodings in frontend/src/hooks/useMediasoup.ts.
 export const simulcastEncodings = [
-  { maxBitrate: 100000, scaleResolutionDownBy: 4, rid: 'r0' },
-  { maxBitrate: 300000, scaleResolutionDownBy: 2, rid: 'r1' },
-  { maxBitrate: 1000000, scaleResolutionDownBy: 1, rid: 'r2' },
+  { maxBitrate: 150000, scaleResolutionDownBy: 4, rid: 'r0', scalabilityMode: 'L1T3' },
+  { maxBitrate: 500000, scaleResolutionDownBy: 2, rid: 'r1', scalabilityMode: 'L1T3' },
+  { maxBitrate: 2500000, scaleResolutionDownBy: 1, rid: 'r2', scalabilityMode: 'L1T3' },
 ];

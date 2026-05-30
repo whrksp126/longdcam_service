@@ -2,7 +2,7 @@ import { Server, Socket } from 'socket.io';
 import { verifyToken, JwtPayload } from '../middleware/auth';
 import { mediasoupManager } from '../media/MediasoupManager';
 import { generateTurnCredentials } from '../config/turn';
-import { Device } from '../models';
+import { Device, Room } from '../models';
 
 interface Participant {
   userId: string;
@@ -40,6 +40,64 @@ interface TheaterState {
 
 const roomTheater = new Map<string, TheaterState>();
 
+// Set once setupSocketHandlers runs; lets REST routes (room deletion) reach the live room.
+let ioRef: Server | null = null;
+
+// --- Reconnection grace ---
+// A dropped socket isn't removed from the room immediately: we wait GRACE_MS so a quick
+// reconnect (WiFi blip, LTE handover) doesn't spam everyone with leave/join churn. If the
+// same user+device rejoins within the window we cancel the pending removal.
+const GRACE_MS = 10000;
+interface PendingLeave {
+  timer: ReturnType<typeof setTimeout>;
+  socketId: string;
+}
+const pendingLeaves = new Map<string, PendingLeave>();
+const leaveKey = (roomId: string, userId: string, deviceId: string) => `${roomId}|${userId}|${deviceId}`;
+
+/** Remove a participant from a room and notify everyone. Socket-independent (uses ioRef). */
+function performParticipantLeave(roomId: string, userId: string, deviceId: string) {
+  const participants = roomParticipants.get(roomId);
+  const key = `${userId}:${deviceId}`;
+  const participant = participants?.get(key);
+
+  if (participant) {
+    const transportIds: string[] = [];
+    if (participant.sendTransportId) transportIds.push(participant.sendTransportId);
+    if (participant.recvTransportId) transportIds.push(participant.recvTransportId);
+    mediasoupManager.cleanupTransports(roomId, transportIds);
+
+    for (const producerId of participant.producerIds) {
+      ioRef?.to(roomId).emit('media:producerClosed', { producerId, userId, deviceId });
+    }
+    participants!.delete(key);
+  }
+
+  ioRef?.to(roomId).emit('room:participantLeft', { userId, deviceId });
+  ioRef?.to(`user:${userId}`).emit('camera:statusUpdate', { deviceId, isInRoom: false, roomSlug: null });
+
+  const theater = roomTheater.get(roomId);
+  if (theater?.hostKey === key) theater.hostKey = null;
+
+  if (participants && participants.size === 0) {
+    mediasoupManager.closeRoom(roomId);
+    roomParticipants.delete(roomId);
+    roomTheater.delete(roomId);
+  }
+}
+
+/**
+ * Force-terminate a room: notify everyone, tear down media, drop in-memory state.
+ * Called both by the in-room owner (room:close socket event) and the REST delete route.
+ */
+export async function forceCloseRoom(roomSlug: string) {
+  if (ioRef) ioRef.to(roomSlug).emit('room:closed', { roomSlug });
+  mediasoupManager.closeRoom(roomSlug);
+  roomParticipants.delete(roomSlug);
+  roomTheater.delete(roomSlug);
+  if (ioRef) ioRef.in(roomSlug).socketsLeave(roomSlug);
+}
+
 function currentTheaterTime(s: TheaterState): number {
   return s.playing ? s.time + (Date.now() - s.lastUpdate) / 1000 : s.time;
 }
@@ -54,6 +112,8 @@ function theaterPayload(s: TheaterState) {
 }
 
 export function setupSocketHandlers(io: Server) {
+  ioRef = io;
+
   // dynacast: cap the publisher's sent simulcast layers to what viewers actually watch.
   mediasoupManager.on('producerSendChange', ({ roomId, producerId, maxSpatialLayer }) => {
     const participants = roomParticipants.get(roomId);
@@ -304,6 +364,25 @@ export function setupSocketHandlers(io: Server) {
         const participants = getRoomParticipants(roomSlug);
         const participantKey = `${user.userId}:${deviceId}`;
 
+        // Reconnect path: cancel any pending grace-leave and tear down the stale entry
+        // (transports/producers from the dropped socket) before re-registering.
+        const lk = leaveKey(roomSlug, user.userId, deviceId);
+        const pending = pendingLeaves.get(lk);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingLeaves.delete(lk);
+        }
+        const stale = participants.get(participantKey);
+        if (stale) {
+          const ids: string[] = [];
+          if (stale.sendTransportId) ids.push(stale.sendTransportId);
+          if (stale.recvTransportId) ids.push(stale.recvTransportId);
+          mediasoupManager.cleanupTransports(roomSlug, ids);
+          for (const pid of stale.producerIds) {
+            socket.to(roomSlug).emit('media:producerClosed', { producerId: pid, userId: user.userId, deviceId });
+          }
+        }
+
         const participant: Participant = {
           userId: user.userId,
           nickname: user.nickname,
@@ -357,11 +436,15 @@ export function setupSocketHandlers(io: Server) {
           deviceLabel: p.deviceLabel,
         }));
 
+        const roomRow = await Room.findOne({ where: { slug: roomSlug }, attributes: ['owner_id'] });
+        const isOwner = !!roomRow && roomRow.owner_id === user.userId;
+
         console.log(`[room:join] ${user.nickname}:${deviceId} joined OK (${participantList.length} participants, ${existingProducers.length} producers)`);
         callback({
           participants: participantList,
           existingProducers,
           iceServers: turnCredentials.iceServers,
+          isOwner,
         });
       } catch (err: any) {
         console.error(`[room:join] ERROR for ${user.nickname}:${deviceId}:`, err.message);
@@ -558,6 +641,12 @@ export function setupSocketHandlers(io: Server) {
       await mediasoupManager.setPreferredLayers(currentRoomId, consumerId, spatialLayer, temporalLayer);
     });
 
+    // Client-driven stall recovery: a viewer's video element is frozen → pull a keyframe.
+    socket.on('media:requestKeyFrame', async ({ consumerId }) => {
+      if (!currentRoomId) return;
+      await mediasoupManager.requestConsumerKeyFrame(currentRoomId, consumerId);
+    });
+
     // --- Watch-together (theater) ---
     const theaterKey = () => `${user.userId}:${deviceId}`;
 
@@ -609,64 +698,60 @@ export function setupSocketHandlers(io: Server) {
       handleRoomLeave();
     });
 
+    // Owner ends the room for everyone: soft-delete + notify + tear down.
+    socket.on('room:close', async (_, callback) => {
+      try {
+        if (!currentRoomId) return callback?.({ error: 'Not in a room' });
+        const room = await Room.findOne({
+          where: { slug: currentRoomId, owner_id: user.userId },
+        });
+        if (!room) return callback?.({ error: '방장만 방을 종료할 수 있습니다' });
+        await room.update({ is_active: false });
+        const slug = currentRoomId;
+        currentRoomId = null;
+        await forceCloseRoom(slug);
+        callback?.({ success: true });
+      } catch (err: any) {
+        callback?.({ error: err.message });
+      }
+    });
+
     socket.on('disconnect', (reason) => {
       handleDisconnect(reason);
     });
 
+    // Explicit leave (user pressed 나가기): remove immediately, no grace.
     function handleRoomLeave() {
       if (!currentRoomId) return;
-
-      const participants = getRoomParticipants(currentRoomId);
-      const key = `${user.userId}:${deviceId}`;
-      const participant = participants.get(key);
-
-      if (participant) {
-        const transportIds: string[] = [];
-        if (participant.sendTransportId) transportIds.push(participant.sendTransportId);
-        if (participant.recvTransportId) transportIds.push(participant.recvTransportId);
-        mediasoupManager.cleanupTransports(currentRoomId!, transportIds);
-
-        for (const producerId of participant.producerIds) {
-          socket.to(currentRoomId!).emit('media:producerClosed', {
-            producerId,
-            userId: user.userId,
-            deviceId,
-          });
-        }
-
-        participants.delete(key);
+      const roomId = currentRoomId;
+      const lk = leaveKey(roomId, user.userId, deviceId);
+      const pending = pendingLeaves.get(lk);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pendingLeaves.delete(lk);
       }
-
-      socket.to(currentRoomId!).emit('room:participantLeft', {
-        userId: user.userId,
-        deviceId,
-      });
-
-      // Broadcast camera status to user's other devices
-      socket.to(`user:${user.userId}`).emit('camera:statusUpdate', {
-        deviceId,
-        isInRoom: false,
-        roomSlug: null,
-      });
-
-      // Theater: release host so others can take over; clear state if room empties.
-      const theater = roomTheater.get(currentRoomId!);
-      if (theater?.hostKey === key) {
-        theater.hostKey = null;
-      }
-
-      if (participants.size === 0) {
-        mediasoupManager.closeRoom(currentRoomId!);
-        roomParticipants.delete(currentRoomId!);
-        roomTheater.delete(currentRoomId!);
-      }
-
-      socket.leave(currentRoomId!);
+      performParticipantLeave(roomId, user.userId, deviceId);
+      socket.leave(roomId);
       currentRoomId = null;
     }
 
     async function handleDisconnect(reason?: string) {
-      handleRoomLeave();
+      // Defer the room removal: a reconnect within GRACE_MS cancels it (see room:join).
+      if (currentRoomId) {
+        const roomId = currentRoomId;
+        const lk = leaveKey(roomId, user.userId, deviceId);
+        const existing = pendingLeaves.get(lk);
+        if (existing) clearTimeout(existing.timer);
+        const timer = setTimeout(() => {
+          pendingLeaves.delete(lk);
+          // Skip if the participant already rejoined on a different socket.
+          const p = roomParticipants.get(roomId)?.get(`${user.userId}:${deviceId}`);
+          if (p && p.socketId !== socket.id) return;
+          performParticipantLeave(roomId, user.userId, deviceId);
+        }, GRACE_MS);
+        pendingLeaves.set(lk, { timer, socketId: socket.id });
+        currentRoomId = null;
+      }
 
       if (deviceId) {
         await Device.update(

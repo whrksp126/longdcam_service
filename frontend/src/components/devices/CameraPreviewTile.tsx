@@ -46,11 +46,17 @@ export function CameraPreviewTile({
   const streamRef = useRef<MediaStream | null>(null);
   const [status, setStatus] = useState<PreviewStatus>(isCurrentDevice ? 'live' : 'connecting');
 
-  // Current device: bind the provided local stream directly.
+  // Current device: bind the provided local stream directly. Treat a stream without a
+  // live video track (no webcam / ended track) as "no_camera" instead of a black frame,
+  // and force play() so the element starts even if autoplay is throttled.
   useEffect(() => {
     if (!isCurrentDevice) return;
-    if (videoRef.current) videoRef.current.srcObject = localStream || null;
-    setStatus(localStream ? 'live' : 'no_camera');
+    const hasVideo = !!localStream && localStream.getVideoTracks().some((t) => t.readyState === 'live');
+    if (videoRef.current) {
+      videoRef.current.srcObject = hasVideo ? localStream! : null;
+      if (hasVideo) videoRef.current.play().catch(() => {});
+    }
+    setStatus(hasVideo ? 'live' : 'no_camera');
   }, [isCurrentDevice, localStream]);
 
   const connectPreview = useCallback(() => {

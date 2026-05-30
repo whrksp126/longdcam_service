@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { Room, RoomMember } from '../models';
 import { authMiddleware } from '../middleware/auth';
+import { forceCloseRoom } from '../signaling/socketHandler';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'longdcam_dev_secret';
 
@@ -201,6 +202,8 @@ router.delete('/rooms/:slug', authMiddleware, async (req, res) => {
   if (!room) return res.status(404).json({ error: 'Room not found or not owner' });
 
   await room.update({ is_active: false });
+  // Notify anyone currently connected to this room and tear down their media.
+  await forceCloseRoom(room.slug);
   res.json({ success: true });
 });
 

@@ -35,4 +35,4 @@ export interface RoomInfo {
 
 export type ConnectionQuality = 'excellent' | 'good' | 'fair' | 'poor' | 'disconnected';
 
-export type LayoutMode = 'grid' | 'spotlight' | 'carousel';
+export type LayoutMode = 'grid' | 'spotlight';

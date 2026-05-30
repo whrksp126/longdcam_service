@@ -190,9 +190,35 @@ class MediasoupManager extends EventEmitter {
       }
     }
 
-    if (room.producerMaxLayer.get(producerId) === maxLayer) return;
+    const prevLayer = room.producerMaxLayer.get(producerId);
+    if (prevLayer === maxLayer) return;
     room.producerMaxLayer.set(producerId, maxLayer);
     this.emit('producerSendChange', { roomId, producerId, maxSpatialLayer: maxLayer });
+
+    // When the publisher is being asked to send a HIGHER spatial layer again (e.g. a
+    // viewer enlarged the tile), that layer was previously not encoded, so consumers
+    // would sit on a frozen frame until the next periodic keyframe. Force a keyframe
+    // now so the newly-available layer decodes right away.
+    if (prevLayer !== undefined && maxLayer > prevLayer) {
+      this.requestKeyFrameForProducer(room, producerId);
+    }
+  }
+
+  /** Ask all live consumers of a producer to pull a fresh keyframe (sends PLI upstream). */
+  private requestKeyFrameForProducer(room: RoomMedia, producerId: string) {
+    for (const consumer of room.consumers.values()) {
+      if (consumer.producerId === producerId && consumer.kind === 'video' && !consumer.closed) {
+        consumer.requestKeyFrame().catch(() => {});
+      }
+    }
+  }
+
+  /** Client-driven stall recovery: a frozen video element asks for a keyframe. */
+  async requestConsumerKeyFrame(roomId: string, consumerId: string) {
+    const room = this.rooms.get(roomId);
+    const consumer = room?.consumers.get(consumerId);
+    if (!consumer || consumer.closed || consumer.kind !== 'video') return;
+    await consumer.requestKeyFrame().catch(() => {});
   }
 
   private cleanupProducerBookkeeping(room: RoomMedia, producerId: string) {
@@ -302,6 +328,7 @@ class MediasoupManager extends EventEmitter {
     const consumer = room?.consumers.get(consumerId);
     if (!room || !consumer || consumer.type !== 'simulcast') return;
     await consumer.setPreferredLayers({ spatialLayer, temporalLayer });
+    consumer.requestKeyFrame().catch(() => {});
     // Feed dynacast: a watcher only wanting layer 0 lets the publisher drop higher layers.
     const map = room.producerDemand.get(consumer.producerId);
     if (map?.has(consumerId)) {

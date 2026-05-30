@@ -106,11 +106,15 @@ export function useMediasoup() {
   const produce = useCallback(async (track: MediaStreamTrack, appData: Record<string, unknown> = {}) => {
     if (!sendTransportRef.current) return null;
 
+    // scalabilityMode 'L1T3' gives each simulcast layer 3 temporal sub-layers. Without
+    // it the decoder has nothing to fall back to under loss/congestion and the top
+    // layer freezes on a still frame; with it the SFU can drop temporal layers and the
+    // picture keeps moving (lower fps) instead of stalling.
     const encodings = track.kind === 'video'
       ? [
-          { maxBitrate: 100000, scaleResolutionDownBy: 4, rid: 'r0' },
-          { maxBitrate: 300000, scaleResolutionDownBy: 2, rid: 'r1' },
-          { maxBitrate: 1000000, scaleResolutionDownBy: 1, rid: 'r2' },
+          { maxBitrate: 150000, scaleResolutionDownBy: 4, rid: 'r0', scalabilityMode: 'L1T3' },
+          { maxBitrate: 500000, scaleResolutionDownBy: 2, rid: 'r1', scalabilityMode: 'L1T3' },
+          { maxBitrate: 2500000, scaleResolutionDownBy: 1, rid: 'r2', scalabilityMode: 'L1T3' },
         ]
       : undefined;
 
